@@ -2441,6 +2441,12 @@ static int snd_pcm_oss_open(struct inode *inode, struct file *file)
 		mutex_unlock(&pcm->open_mutex);
 		schedule();
 		mutex_lock(&pcm->open_mutex);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+		if (pcm->card->shutdown) {
+			err = -ENODEV;
+			break;
+		}
+#endif
 		if (signal_pending(current)) {
 			err = -ERESTARTSYS;
 			break;
@@ -2450,6 +2456,9 @@ static int snd_pcm_oss_open(struct inode *inode, struct file *file)
 	mutex_unlock(&pcm->open_mutex);
 	if (err < 0)
 		goto __error;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	snd_card_unref(pcm->card);
+#endif
 	return err;
 
       __error:
@@ -2457,6 +2466,10 @@ static int snd_pcm_oss_open(struct inode *inode, struct file *file)
       __error2:
       	snd_card_file_remove(pcm->card, file);
       __error1:
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (pcm)
+		snd_card_unref(pcm->card);
+#endif
 	return err;
 }
 

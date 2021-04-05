@@ -406,6 +406,11 @@ static void scsi_run_queue(struct request_queue *q)
 	LIST_HEAD(starved_list);
 	unsigned long flags;
 
+#if 1 // ZYXEL
+	/* if the device is dead, sdev will be NULL, so no queue to run */
+	if (!sdev)
+		return;
+#endif
 	shost = sdev->host;
 	if (scsi_target(sdev)->single_lun)
 		scsi_single_lun_run(sdev);
@@ -437,9 +442,17 @@ static void scsi_run_queue(struct request_queue *q)
 		}
 
 		spin_unlock(shost->host_lock);
+#if 1 // ZYXEL
+		/* hold a reference on the device so it doesn't release device */
+		get_device(&sdev->sdev_gendev);
+#endif
 		spin_lock(sdev->request_queue->queue_lock);
 		__blk_run_queue(sdev->request_queue);
 		spin_unlock(sdev->request_queue->queue_lock);
+#if 1 // ZYXEL
+		/* ok to remove device now */
+		put_device(&sdev->sdev_gendev);
+#endif
 		spin_lock(shost->host_lock);
 	}
 	/* put any unprocessed entries back */

@@ -65,6 +65,9 @@
 #define SIOCDIFADDR	0x8936		/* delete PA address		*/
 #define	SIOCSIFHWBROADCAST	0x8937	/* set hardware broadcast addr	*/
 #define SIOCGIFCOUNT	0x8938		/* get number of devices */
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+#define SIOCKILLADDR	0x8939		/* kill sockets with this local addr */
+#endif
 
 #define SIOCGIFBR	0x8940		/* Bridging support		*/
 #define SIOCSIFBR	0x8941		/* Set bridging options 	*/
@@ -126,6 +129,17 @@
 
 /* hardware time stamping: parameters in linux/net_tstamp.h */
 #define SIOCSHWTSTAMP   0x89b0
+
+#if !defined(CONFIG_BCM_IN_KERNEL) || defined(CONFIG_BCM_KF_MISC_IOCTLS) || defined(CONFIG_BCM_KF_NETFILTER)
+/***********************BRCM global ioctl calls*****************************/
+#define SIOC_BRCM_GLOBAL_BASE    0x89c0
+#define SIOCGIFTRANSSTART  (SIOC_BRCM_GLOBAL_BASE+0)    /* Used by SNMP */
+#define SIOCCIFSTATS  (SIOC_BRCM_GLOBAL_BASE+1)  /* Clean up the Stats of a device */
+#endif
+#if !defined(CONFIG_BCM_IN_KERNEL) || defined(CONFIG_BCM_KF_IGMP) || defined(CONFIG_BCM_KF_MLD)
+#define SIOCDEVISWANDEV (SIOC_BRCM_GLOBAL_BASE+2)
+#define SIOCDEVISBRDEV  (SIOC_BRCM_GLOBAL_BASE+3)
+#endif
 
 /* Device private ioctl calls */
 

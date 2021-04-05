@@ -1727,7 +1727,12 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 
 do_it_again:
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	BUG_ON(!tty->read_buf);
+#else
+	if (WARN_ON(!tty->read_buf))
+		return -EAGAIN;
+#endif
 
 	c = job_control(tty, file);
 	if (c < 0)
@@ -1987,7 +1992,15 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 				tty->ops->flush_chars(tty);
 		} else {
 			while (nr > 0) {
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+				/*CVE-2014-0196*/
+				mutex_lock(&tty->output_lock);
+#endif
 				c = tty->ops->write(tty, b, nr);
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)				
+				/*CVE-2014-0196*/
+				mutex_unlock(&tty->output_lock);
+#endif
 				if (c < 0) {
 					retval = c;
 					goto break_out;

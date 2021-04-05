@@ -32,6 +32,13 @@ MODULE_DESCRIPTION("Xtables: TCP Maximum Segment Size (MSS) adjustment");
 MODULE_ALIAS("ipt_TCPMSS");
 MODULE_ALIAS("ip6t_TCPMSS");
 
+
+#ifdef CONFIG_BCM_KF_FILENAME_CHECK
+/* Create compile error if filename is not correct (to catch case-sensitive filename errors) */
+#define __CHECK_FILENAME(filename) int __checkfname __attribute__((unused)) = (1/((__builtin_strcmp((__FILE__ + __builtin_strlen(__FILE__) - __builtin_strlen(filename)), filename))?0:1))
+__CHECK_FILENAME("xt_TCPMSS.c");
+#endif
+
 static inline unsigned int
 optlen(const u_int8_t *opt, unsigned int offset)
 {
@@ -183,6 +190,12 @@ tcpmss_tg4(struct sk_buff *skb, const struct xt_action_param *par)
 	__be16 newlen;
 	int ret;
 
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_TCPMSS;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
+
 	ret = tcpmss_mangle_packet(skb, par->targinfo,
 				   tcpmss_reverse_mtu(skb, PF_INET),
 				   iph->ihl * 4,
@@ -207,6 +220,12 @@ tcpmss_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 	__be16 frag_off;
 	int tcphoff;
 	int ret;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_TCPMSS;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
 
 	nexthdr = ipv6h->nexthdr;
 	tcphoff = ipv6_skip_exthdr(skb, sizeof(*ipv6h), &nexthdr, &frag_off);

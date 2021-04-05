@@ -10,6 +10,10 @@
 
 #define to_urb(d) container_of(d, struct urb, kref)
 
+//20130822, TimLiu To support USB LED.
+#if defined(ZYXEL) && (ZYXEL==1)
+extern void USB_LED_Control( int USBId, int status );
+#endif
 
 static void urb_destroy(struct kref *kref)
 {
@@ -503,6 +507,10 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 		}
 	}
 
+	if( dev->portnum != 0x0)	// port 0 will be root
+		USB_LED_Control( dev->portnum, 0x02 );
+	//printk("===> USB port %d submit urb\n", dev->portnum);
+
 	return usb_hcd_submit_urb(urb, mem_flags);
 }
 EXPORT_SYMBOL_GPL(usb_submit_urb);
@@ -623,6 +631,7 @@ void usb_kill_urb(struct urb *urb)
 	might_sleep();
 	if (!(urb && urb->dev && urb->ep))
 		return;
+
 	atomic_inc(&urb->reject);
 
 	usb_hcd_unlink_urb(urb, -ENOENT);

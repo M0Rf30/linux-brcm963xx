@@ -49,7 +49,11 @@
 
 #define VMALLOC_START     MAP_BASE
 
+#if defined(CONFIG_BCM_KF_512MB_DDR) && defined(CONFIG_BCM_512MB_DDR)
+#define PKMAP_BASE		(0xfc000000UL)
+#else
 #define PKMAP_BASE		(0xfe000000UL)
+#endif
 
 #ifdef CONFIG_HIGHMEM
 # define VMALLOC_END	(PKMAP_BASE-2*PAGE_SIZE)

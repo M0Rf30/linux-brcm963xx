@@ -178,6 +178,17 @@ send_unreach(struct net *net, struct sk_buff *skb_in, unsigned char code,
 		skb_in->dev = net->loopback_dev;
 
 	icmpv6_send(skb_in, ICMPV6_DEST_UNREACH, code, 0);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+#ifdef CONFIG_IP6_NF_TARGET_REJECT_SKERR
+	if (skb_in->sk) {
+		icmpv6_err_convert(ICMPV6_DEST_UNREACH, code,
+				   &skb_in->sk->sk_err);
+		skb_in->sk->sk_error_report(skb_in->sk);
+		pr_debug("ip6t_REJECT: sk_err=%d for skb=%p sk=%p\n",
+			skb_in->sk->sk_err, skb_in, skb_in->sk);
+	}
+#endif
+#endif
 }
 
 static unsigned int
@@ -208,6 +219,13 @@ reject_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 		break;
 	case IP6T_TCP_RESET:
 		send_reset(net, skb);
+		break;
+/* __ZyXEL__, Albert, 20170213, for ANATEL Conformance IPv6 Test  */
+	case IP6T_ICMP6_POLICY_FAIL:
+		send_unreach(net, skb, ICMPV6_POLICY_FAIL, par->hooknum);
+		break;
+	case IP6T_ICMP6_REJECT_ROUTE:
+		send_unreach(net, skb, ICMPV6_REJECT_ROUTE, par->hooknum);
 		break;
 	default:
 		if (net_ratelimit())

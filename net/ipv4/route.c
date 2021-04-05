@@ -118,6 +118,7 @@
 #define IP_MAX_MTU	0xFFF0
 
 #define RT_GC_TIMEOUT (300*HZ)
+#define PROC_IGMP_NOIPSRCADDR_ENABLE	"zy_igmp_noipsrcaddr_enable"
 
 static int ip_rt_max_size;
 static int ip_rt_gc_timeout __read_mostly	= RT_GC_TIMEOUT;
@@ -149,6 +150,14 @@ static struct dst_entry *ipv4_negative_advice(struct dst_entry *dst);
 static void		 ipv4_link_failure(struct sk_buff *skb);
 static void		 ip_rt_update_pmtu(struct dst_entry *dst, u32 mtu);
 static int rt_garbage_collect(struct dst_ops *ops);
+
+/* R-Cable requests using 0.0.0.0 as igmp packet source IP. This feature
+   is enabled/disabled by ROM-file parameter NoIpSrcAddressEnable */
+uint32_t zy_igmp_noipsrcaddr_enable __read_mostly;
+static int proc_igmp_noipsrcaddr_enable_read(char *buffer,char **buffer_location,off_t offset, int buffer_length, int *eof, void *data);
+static int proc_igmp_noipsrcaddr_enable_write(struct file *file, const char *buf, unsigned long count, void *data);
+int Zy_IGMP_NoIpSrcAddr_init_proc(void);
+void Zy_IGMP_NoIpSrcAddr_deinit_proc(void);
 
 static void ipv4_dst_ifdown(struct dst_entry *dst, struct net_device *dev,
 			    int how)
@@ -250,7 +259,7 @@ struct rt_hash_bucket {
 };
 
 #if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK) || \
-	defined(CONFIG_PROVE_LOCKING)
+	defined(CONFIG_PROVE_LOCKING) || defined(CONFIG_PREEMPT_RT_FULL)
 /*
  * Instead of using one spinlock for each rt_hash_bucket, we use a table of spinlocks
  * The size of this table is a power of two and depends on the number of CPUS.
@@ -2708,9 +2717,24 @@ static struct rtable *ip_route_output_slow(struct net *net, struct flowi4 *fl4)
 		}
 		if (ipv4_is_local_multicast(fl4->daddr) ||
 		    ipv4_is_lbcast(fl4->daddr)) {
-			if (!fl4->saddr)
-				fl4->saddr = inet_select_addr(dev_out, 0,
-							      RT_SCOPE_LINK);
+			if (!fl4->saddr){
+				/* R-Cable: Use 0.0.0.0 as igmpv3 packet source
+					IP if dev_out has no IP */
+				if((zy_igmp_noipsrcaddr_enable) &&
+					(fl4->flowi4_proto == IPPROTO_IGMP)) {
+					struct in_device *in_dev;
+					in_dev = __in_dev_get_rcu(dev_out);
+					for_primary_ifa(in_dev) {
+						if (ifa->ifa_scope > RT_SCOPE_LINK)
+							continue;
+						fl4->saddr = ifa->ifa_local;
+					} endfor_ifa(dev_out);
+				}
+				else{
+					fl4->saddr = inet_select_addr(dev_out, 0,
+								      RT_SCOPE_LINK);
+				}
+			}
 			goto make_route;
 		}
 		if (fl4->saddr) {
@@ -2755,9 +2779,26 @@ static struct rtable *ip_route_output_slow(struct net *net, struct flowi4 *fl4)
 			   likely IPv6, but we do not.
 			 */
 
-			if (fl4->saddr == 0)
-				fl4->saddr = inet_select_addr(dev_out, 0,
-							      RT_SCOPE_LINK);
+			if (fl4->saddr == 0){
+				struct in_device *in_dev;
+				/*R-Cable: Use 0.0.0.0 as igmpv2 packet source
+					IP if dev_out has no IP */
+				if(zy_igmp_noipsrcaddr_enable &&
+					ipv4_is_multicast(fl4->daddr) &&
+					(fl4->flowi4_proto == IPPROTO_IGMP))
+				{
+					in_dev = __in_dev_get_rcu(dev_out);
+					for_primary_ifa(in_dev) {
+						if (ifa->ifa_scope > RT_SCOPE_LINK)
+							continue;
+						fl4->saddr = ifa->ifa_local;
+					} endfor_ifa(dev_out);
+				}
+				else{
+					fl4->saddr = inet_select_addr(dev_out, 0,
+								      RT_SCOPE_LINK);
+				}
+			}
 			res.type = RTN_UNICAST;
 			goto make_route;
 		}
@@ -3029,9 +3070,15 @@ static int rt_fill_info(struct net *net,
 
 		if (ipv4_is_multicast(dst) && !ipv4_is_local_multicast(dst) &&
 		    IPV4_DEVCONF_ALL(net, MC_FORWARDING)) {
+#if defined(CONFIG_BCM_KF_IGMP)
+			int err = ipmr_get_route(net, skb,
+						 rt->rt_src, rt->rt_dst,
+						 r, nowait, rt->rt_iif);
+#else
 			int err = ipmr_get_route(net, skb,
 						 rt->rt_src, rt->rt_dst,
 						 r, nowait);
+#endif
 			if (err <= 0) {
 				if (!nowait) {
 					if (err == 0)
@@ -3441,6 +3488,7 @@ int __init ip_rt_init(void)
 {
 	int rc = 0;
 
+
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	ip_rt_acct = __alloc_percpu(256 * sizeof(struct ip_rt_acct), __alignof__(struct ip_rt_acct));
 	if (!ip_rt_acct)
@@ -3495,8 +3543,74 @@ int __init ip_rt_init(void)
 	register_pernet_subsys(&sysctl_route_ops);
 #endif
 	register_pernet_subsys(&rt_genid_ops);
+
+	/* R-Cable requests using 0.0.0.0 as igmp packet source IP */
+	if (Zy_IGMP_NoIpSrcAddr_init_proc() < 0){
+		pr_err("Unable to create proc entry zy_igmp_noipsrcaddr_enable\n");
+		Zy_IGMP_NoIpSrcAddr_deinit_proc();
+	}
+
 	return rc;
 }
+
+static int proc_igmp_noipsrcaddr_enable_read (char *buffer,char **buffer_location,
+					off_t offset, int buffer_length, int *eof, void *data)
+{
+	int ret=0;
+	char temp[80];
+
+	if (offset > 0)	{
+		/* we have finished to read, return 0 */
+ 		ret  = 0;
+	}	else 	{
+		/* fill the buffer, return the buffer size */
+		sprintf(temp,"%d\n",zy_igmp_noipsrcaddr_enable );
+		ret = sprintf(buffer, temp);
+	}
+	return ret;
+}
+
+static int proc_igmp_noipsrcaddr_enable_write (struct file *file, const char *buf, unsigned long count, void *data)
+{
+	char local_buf[20];
+	int len;
+
+	len = sizeof(local_buf) < count ? sizeof(local_buf) - 1 : count;
+	len = len - copy_from_user(local_buf, buf, len);
+	local_buf[len] = 0;
+
+	sscanf(local_buf,"%d",&zy_igmp_noipsrcaddr_enable);
+	printk("\n Settting zy_igmp_noipsrcaddr_enable : %d\n", zy_igmp_noipsrcaddr_enable);
+
+    return count;
+}
+
+int Zy_IGMP_NoIpSrcAddr_init_proc (void)
+{
+	struct proc_dir_entry *proc_zy_igmp_noipsrcaddr_enable;
+
+	proc_zy_igmp_noipsrcaddr_enable = create_proc_entry(PROC_IGMP_NOIPSRCADDR_ENABLE, 0644, NULL);
+	if (proc_zy_igmp_noipsrcaddr_enable == NULL) {
+		printk(KERN_ALERT "Error: Could not initialize /proc/%s\n", PROC_IGMP_NOIPSRCADDR_ENABLE);
+		return -1;
+	}
+
+	proc_zy_igmp_noipsrcaddr_enable->read_proc  = proc_igmp_noipsrcaddr_enable_read;
+	proc_zy_igmp_noipsrcaddr_enable->write_proc = proc_igmp_noipsrcaddr_enable_write;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
+	proc_zy_igmp_noipsrcaddr_enable->owner 	 = THIS_MODULE;
+#endif
+	printk(KERN_INFO "/proc/%s created\n", PROC_IGMP_NOIPSRCADDR_ENABLE);
+
+	return 0;	/* everything is ok */
+}
+
+void Zy_IGMP_NoIpSrcAddr_deinit_proc (void)
+{
+	remove_proc_entry(PROC_IGMP_NOIPSRCADDR_ENABLE, NULL);
+	printk(KERN_INFO "/proc/%s remove\n", PROC_IGMP_NOIPSRCADDR_ENABLE);
+}
+
 
 #ifdef CONFIG_SYSCTL
 /*

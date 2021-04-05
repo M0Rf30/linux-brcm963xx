@@ -15,6 +15,13 @@ struct nf_nat_ipv4_range {
 	__be32				max_ip;
 	union nf_conntrack_man_proto	min;
 	union nf_conntrack_man_proto	max;
+#if 1 /* Support one-to-one port mapping. __TELEFONICA__, ZyXEL Stan Su, 20120307. */
+	/* mappingFlag is 1, if it needs to do one-to-one port mapping. */
+	unsigned int mappingFlag;
+
+	/* Record external port information. */
+	union nf_conntrack_man_proto mappingMin, mappingMax;
+#endif
 };
 
 struct nf_nat_ipv4_multi_range_compat {

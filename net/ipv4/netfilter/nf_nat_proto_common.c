@@ -45,6 +45,9 @@ void nf_nat_proto_unique_tuple(struct nf_conntrack_tuple *tuple,
 	unsigned int range_size, min, i;
 	__be16 *portptr;
 	u_int16_t off;
+#if 1 /* Support one-to-one port mapping. __TELEFONICA__, ZyXEL Stan Su, 20120308. */
+	u_int16_t mappingOffset = 0;
+#endif
 
 	if (maniptype == NF_NAT_MANIP_SRC)
 		portptr = &tuple->src.u.all;
@@ -83,7 +86,20 @@ void nf_nat_proto_unique_tuple(struct nf_conntrack_tuple *tuple,
 	else
 		off = *rover;
 
+#if 1 /* Support one-to-one port mapping. __TELEFONICA__, ZyXEL Stan Su, 20120308. */
+	mappingOffset = ntohs(tuple->dst.u.all) - ntohs(range->mappingMin.all);
+	for (i = 0; ; ++off, mappingOffset++) {
+#else
 	for (i = 0; ; ++off) {
+#endif
+#if 1 /* Support one-to-one port mapping. __TELEFONICA__, ZyXEL Stan Su, 20120308. */
+		/* if range->flags & IP_NAT_RANGE_PROTO_RANDOM is true, portprt should be counted by off. */
+		if (range->mappingFlag == 1 && !(range->flags & NF_NAT_RANGE_PROTO_RANDOM))
+		{
+			*portptr = htons(min + mappingOffset % range_size);
+		}
+		else
+#endif
 		*portptr = htons(min + off % range_size);
 		if (++i != range_size && nf_nat_used_tuple(tuple, ct))
 			continue;

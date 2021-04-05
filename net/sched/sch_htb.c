@@ -39,6 +39,9 @@
 #include <linux/slab.h>
 #include <net/netlink.h>
 #include <net/pkt_sched.h>
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+#include <linux/blog.h>
+#endif
 
 /* HTB algorithm.
     Author: devik@cdi.cz
@@ -560,6 +563,9 @@ static int htb_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		} else {
 			kfree_skb(skb);
 			sch->qstats.drops++;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		    sch->bstats.dropbytes += skb->len;
+#endif
 			return NET_XMIT_DROP;
 		}
 #ifdef CONFIG_NET_CLS_ACT
@@ -573,6 +579,9 @@ static int htb_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		if (net_xmit_drop_count(ret)) {
 			sch->qstats.drops++;
 			cl->qstats.drops++;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		    sch->bstats.dropbytes += skb->len;
+#endif
 		}
 		return ret;
 	} else {
@@ -876,7 +885,11 @@ ok:
 	q->now = psched_get_time();
 	start_at = jiffies;
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	next_event = q->now + 5 * PSCHED_TICKS_PER_SEC;
+#else
+	next_event = q->now + 5LLU * PSCHED_TICKS_PER_SEC;
+#endif
 
 	for (level = 0; level < TC_HTB_MAXDEPTH; level++) {
 		/* common case optimization - skip event handler quickly */
@@ -901,7 +914,14 @@ ok:
 			m |= 1 << prio;
 			skb = htb_dequeue_tree(q, prio, level);
 			if (likely(skb != NULL))
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+                        {
+				blog_skip(skb);
+#endif
 				goto ok;
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+                        }
+#endif
 		}
 	}
 	sch->qstats.overlimits++;

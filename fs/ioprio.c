@@ -145,8 +145,16 @@ static int get_task_ioprio(struct task_struct *p)
 	if (ret)
 		goto out;
 	ret = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, IOPRIO_NORM);
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+/*CVE-2016-7911*/
+	task_lock(p);
+#endif
 	if (p->io_context)
 		ret = p->io_context->ioprio;
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+/*CVE-2016-7911*/
+	task_unlock(p);
+#endif
 out:
 	return ret;
 }

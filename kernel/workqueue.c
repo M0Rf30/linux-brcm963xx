@@ -44,6 +44,10 @@
 
 #include "workqueue_sched.h"
 
+#if defined(CONFIG_BCM_KF_BUZZZ) && defined(CONFIG_BUZZZ_KEVT)
+#include <asm/buzzz.h>
+#endif  /*  CONFIG_BUZZZ_KEVT */
+
 enum {
 	/* global_cwq flags */
 	GCWQ_MANAGE_WORKERS	= 1 << 0,	/* need to manage workers */
@@ -137,6 +141,7 @@ struct worker {
 	unsigned int		flags;		/* X: flags */
 	int			id;		/* I: worker id */
 	struct work_struct	rebind_work;	/* L: rebind worker to cpu */
+	int			sleeping;	/* None */
 };
 
 /*
@@ -655,66 +660,58 @@ static void wake_up_worker(struct global_cwq *gcwq)
 }
 
 /**
- * wq_worker_waking_up - a worker is waking up
- * @task: task waking up
- * @cpu: CPU @task is waking up to
+ * wq_worker_running - a worker is running again
+ * @task: task returning from sleep
  *
- * This function is called during try_to_wake_up() when a worker is
- * being awoken.
- *
- * CONTEXT:
- * spin_lock_irq(rq->lock)
+ * This function is called when a worker returns from schedule()
  */
-void wq_worker_waking_up(struct task_struct *task, unsigned int cpu)
+void wq_worker_running(struct task_struct *task)
 {
 	struct worker *worker = kthread_data(task);
 
+	if (!worker->sleeping)
+		return;
 	if (!(worker->flags & WORKER_NOT_RUNNING))
-		atomic_inc(get_gcwq_nr_running(cpu));
+		atomic_inc(get_gcwq_nr_running(smp_processor_id()));
+	worker->sleeping = 0;
 }
 
 /**
  * wq_worker_sleeping - a worker is going to sleep
  * @task: task going to sleep
- * @cpu: CPU in question, must be the current CPU number
  *
- * This function is called during schedule() when a busy worker is
- * going to sleep.  Worker on the same cpu can be woken up by
- * returning pointer to its task.
- *
- * CONTEXT:
- * spin_lock_irq(rq->lock)
- *
- * RETURNS:
- * Worker task on @cpu to wake up, %NULL if none.
+ * This function is called from schedule() when a busy worker is
+ * going to sleep.
  */
-struct task_struct *wq_worker_sleeping(struct task_struct *task,
-				       unsigned int cpu)
+void wq_worker_sleeping(struct task_struct *task)
 {
-	struct worker *worker = kthread_data(task), *to_wakeup = NULL;
-	struct global_cwq *gcwq = get_gcwq(cpu);
-	atomic_t *nr_running = get_gcwq_nr_running(cpu);
+	struct worker *worker = kthread_data(task);
+	struct global_cwq *gcwq;
+	int cpu;
 
 	if (worker->flags & WORKER_NOT_RUNNING)
-		return NULL;
+		return;
 
-	/* this can only happen on the local cpu */
-	BUG_ON(cpu != raw_smp_processor_id());
+	if (WARN_ON_ONCE(worker->sleeping))
+		return;
 
+	worker->sleeping = 1;
+
+	cpu = smp_processor_id();
+	gcwq = get_gcwq(cpu);
+	spin_lock_irq(&gcwq->lock);
 	/*
 	 * The counterpart of the following dec_and_test, implied mb,
 	 * worklist not empty test sequence is in insert_work().
 	 * Please read comment there.
-	 *
-	 * NOT_RUNNING is clear.  This means that trustee is not in
-	 * charge and we're running on the local cpu w/ rq lock held
-	 * and preemption disabled, which in turn means that none else
-	 * could be manipulating idle_list, so dereferencing idle_list
-	 * without gcwq lock is safe.
 	 */
-	if (atomic_dec_and_test(nr_running) && !list_empty(&gcwq->worklist))
-		to_wakeup = first_worker(gcwq);
-	return to_wakeup ? to_wakeup->task : NULL;
+	if (atomic_dec_and_test(get_gcwq_nr_running(cpu)) &&
+	    !list_empty(&gcwq->worklist)) {
+		worker = first_worker(gcwq);
+		if (worker)
+			wake_up_process(worker->task);
+	}
+	spin_unlock_irq(&gcwq->lock);
 }
 
 /**
@@ -1065,8 +1062,8 @@ int queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
 	int ret;
 
-	ret = queue_work_on(get_cpu(), wq, work);
-	put_cpu();
+	ret = queue_work_on(get_cpu_light(), wq, work);
+	put_cpu_light();
 
 	return ret;
 }
@@ -1141,8 +1138,13 @@ int queue_delayed_work_on(int cpu, struct workqueue_struct *wq,
 	if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work))) {
 		unsigned int lcpu;
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		BUG_ON(timer_pending(timer));
 		BUG_ON(!list_empty(&work->entry));
+#else
+		WARN_ON_ONCE(timer_pending(timer));
+		WARN_ON_ONCE(!list_empty(&work->entry));
+#endif
 
 		timer_stats_timer_set_start_info(&dwork->timer);
 
@@ -1210,13 +1212,8 @@ static void worker_enter_idle(struct worker *worker)
 	} else
 		wake_up_all(&gcwq->trustee_wait);
 
-	/*
-	 * Sanity check nr_running.  Because trustee releases gcwq->lock
-	 * between setting %WORKER_ROGUE and zapping nr_running, the
-	 * warning may trigger spuriously.  Check iff trustee is idle.
-	 */
-	WARN_ON_ONCE(gcwq->trustee_state == TRUSTEE_DONE &&
-		     gcwq->nr_workers == gcwq->nr_idle &&
+	/* sanity check nr_running */
+	WARN_ON_ONCE(gcwq->nr_workers == gcwq->nr_idle &&
 		     atomic_read(get_gcwq_nr_running(gcwq->cpu)));
 }
 
@@ -1864,11 +1861,27 @@ __acquires(&gcwq->lock)
 
 	spin_unlock_irq(&gcwq->lock);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	smp_wmb();	/* paired with test_and_set_bit(PENDING) */
+#endif
 	work_clear_pending(work);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+
+#endif
 	lock_map_acquire_read(&cwq->wq->lockdep_map);
 	lock_map_acquire(&lockdep_map);
 	trace_workqueue_execute_start(work);
+
+#if defined(CONFIG_BCM_KF_BUZZZ) && defined(CONFIG_BUZZZ_KEVT) && (BUZZZ_KEVT_LVL >= 1)
+	buzzz_kevt_log1(BUZZZ_KEVT_ID_WORKQ_ENTRY, (int)f);
+#endif  /*  CONFIG_BUZZZ_KEVT && BUZZZ_KEVT_LVL >= 1 */
+
 	f(work);
+
+#if defined(CONFIG_BCM_KF_BUZZZ) && defined(CONFIG_BUZZZ_KEVT) && (BUZZZ_KEVT_LVL >= 1)
+	buzzz_kevt_log1(BUZZZ_KEVT_ID_WORKQ_EXIT, (int)f);
+#endif  /*  CONFIG_BUZZZ_KEVT && BUZZZ_KEVT_LVL >= 1 */
+
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.
@@ -2038,8 +2051,16 @@ static int rescuer_thread(void *__wq)
 repeat:
 	set_current_state(TASK_INTERRUPTIBLE);
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (kthread_should_stop())
+#else
+	if (kthread_should_stop()) {
+		__set_current_state(TASK_RUNNING);
+#endif
 		return 0;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	}
+#endif
 
 	/*
 	 * See whether any cpu is asking for help.  Unbounded
@@ -3433,14 +3454,23 @@ static int __cpuinit trustee_thread(void *__gcwq)
 
 	for_each_busy_worker(worker, i, pos, gcwq) {
 		struct work_struct *rebind_work = &worker->rebind_work;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+		unsigned long worker_flags = worker->flags;
+#endif
 
 		/*
 		 * Rebind_work may race with future cpu hotplug
 		 * operations.  Use a separate flag to mark that
 		 * rebinding is scheduled.
 		 */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		worker->flags |= WORKER_REBIND;
 		worker->flags &= ~WORKER_ROGUE;
+#else
+		worker_flags |= WORKER_REBIND;
+		worker_flags &= ~WORKER_ROGUE;
+		ACCESS_ONCE(worker->flags) = worker_flags;
+#endif
 
 		/* queue rebind_work, wq doesn't matter, use the default one */
 		if (test_and_set_bit(WORK_STRUCT_PENDING_BIT,
@@ -3517,6 +3547,25 @@ static int __devinit workqueue_cpu_callback(struct notifier_block *nfb,
 				kthread_stop(new_trustee);
 			return NOTIFY_BAD;
 		}
+		break;
+	case CPU_POST_DEAD:
+	case CPU_UP_CANCELED:
+	case CPU_DOWN_FAILED:
+	case CPU_ONLINE:
+		break;
+	case CPU_DYING:
+		/*
+		 * We access this lockless. We are on the dying CPU
+		 * and called from stomp machine.
+		 *
+		 * Before this, the trustee and all workers except for
+		 * the ones which are still executing works from
+		 * before the last CPU down must be on the cpu.  After
+		 * this, they'll all be diasporas.
+		 */
+		gcwq->flags |= GCWQ_DISASSOCIATED;
+	default:
+		goto out;
 	}
 
 	/* some are called w/ irq disabled, don't disturb irq status */
@@ -3534,16 +3583,6 @@ static int __devinit workqueue_cpu_callback(struct notifier_block *nfb,
 	case CPU_UP_PREPARE:
 		BUG_ON(gcwq->first_idle);
 		gcwq->first_idle = new_worker;
-		break;
-
-	case CPU_DYING:
-		/*
-		 * Before this, the trustee and all workers except for
-		 * the ones which are still executing works from
-		 * before the last CPU down must be on the cpu.  After
-		 * this, they'll all be diasporas.
-		 */
-		gcwq->flags |= GCWQ_DISASSOCIATED;
 		break;
 
 	case CPU_POST_DEAD:
@@ -3579,6 +3618,7 @@ static int __devinit workqueue_cpu_callback(struct notifier_block *nfb,
 
 	spin_unlock_irqrestore(&gcwq->lock, flags);
 
+out:
 	return notifier_from_errno(0);
 }
 
@@ -3620,18 +3660,33 @@ static int __devinit workqueue_cpu_down_callback(struct notifier_block *nfb,
 #ifdef CONFIG_SMP
 
 struct work_for_cpu {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct completion completion;
+#else
+	struct work_struct work;
+#endif
 	long (*fn)(void *);
 	void *arg;
 	long ret;
 };
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static int do_work_for_cpu(void *_wfc)
+#else
+static void work_for_cpu_fn(struct work_struct *work)
+#endif
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct work_for_cpu *wfc = _wfc;
+#else
+	struct work_for_cpu *wfc = container_of(work, struct work_for_cpu, work);
+
+#endif
 	wfc->ret = wfc->fn(wfc->arg);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	complete(&wfc->completion);
 	return 0;
+#endif
 }
 
 /**
@@ -3646,19 +3701,29 @@ static int do_work_for_cpu(void *_wfc)
  */
 long work_on_cpu(unsigned int cpu, long (*fn)(void *), void *arg)
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct task_struct *sub_thread;
 	struct work_for_cpu wfc = {
 		.completion = COMPLETION_INITIALIZER_ONSTACK(wfc.completion),
 		.fn = fn,
 		.arg = arg,
 	};
+#else
+	struct work_for_cpu wfc = { .fn = fn, .arg = arg };
+#endif
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	sub_thread = kthread_create(do_work_for_cpu, &wfc, "work_for_cpu");
 	if (IS_ERR(sub_thread))
 		return PTR_ERR(sub_thread);
 	kthread_bind(sub_thread, cpu);
 	wake_up_process(sub_thread);
 	wait_for_completion(&wfc.completion);
+#else
+	INIT_WORK_ONSTACK(&wfc.work, work_for_cpu_fn);
+	schedule_work_on(cpu, &wfc.work);
+	flush_work(&wfc.work);
+#endif
 	return wfc.ret;
 }
 EXPORT_SYMBOL_GPL(work_on_cpu);

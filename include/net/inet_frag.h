@@ -5,6 +5,10 @@ struct netns_frags {
 	int			nqueues;
 	atomic_t		mem;
 	struct list_head	lru_list;
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+	/*CVE-2014-0100*/
+	spinlock_t		lru_lock;
+#endif
 
 	/* sysctls */
 	int			timeout;
@@ -33,6 +37,15 @@ struct inet_frag_queue {
 
 #define INETFRAGS_HASHSZ		64
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+/* averaged:
+ * max_depth = default ipfrag_high_thresh / INETFRAGS_HASHSZ /
+ *	       rounded up (SKB_TRUELEN(0) + sizeof(struct ipq or
+ *	       struct frag_queue))
+ */
+#define INETFRAGS_MAXDEPTH		128
+
+#endif
 struct inet_frags {
 	struct hlist_head	hash[INETFRAGS_HASHSZ];
 	rwlock_t		lock;
@@ -64,11 +77,40 @@ int inet_frag_evictor(struct netns_frags *nf, struct inet_frags *f);
 struct inet_frag_queue *inet_frag_find(struct netns_frags *nf,
 		struct inet_frags *f, void *key, unsigned int hash)
 	__releases(&f->lock);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+void inet_frag_maybe_warn_overflow(struct inet_frag_queue *q,
+				   const char *prefix);
+#endif
 
 static inline void inet_frag_put(struct inet_frag_queue *q, struct inet_frags *f)
 {
 	if (atomic_dec_and_test(&q->refcnt))
 		inet_frag_destroy(q, f, NULL);
 }
+
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+/*CVE-2014-0100*/
+static inline void inet_frag_lru_move(struct inet_frag_queue *q)
+{
+	spin_lock(&q->net->lru_lock);
+	list_move_tail(&q->lru_list, &q->net->lru_list);
+	spin_unlock(&q->net->lru_lock);
+}
+
+static inline void inet_frag_lru_del(struct inet_frag_queue *q)
+{
+	spin_lock(&q->net->lru_lock);
+	list_del(&q->lru_list);
+	spin_unlock(&q->net->lru_lock);
+}
+
+static inline void inet_frag_lru_add(struct netns_frags *nf,
+				     struct inet_frag_queue *q)
+{
+	spin_lock(&nf->lru_lock);
+	list_add_tail(&q->lru_list, &nf->lru_list);
+	spin_unlock(&nf->lru_lock);
+}
+#endif
 
 #endif

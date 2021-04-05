@@ -1,6 +1,8 @@
 #
 # Makefile for the netfilter modules for Link Layer filtering on a bridge.
 #
+# /* ZyXEL QoS, Mark (porting from MSTC) */
+EXTRA_CFLAGS    += -I$(INC_BRCMDRIVER_PUB_PATH)/$(BRCM_BOARD)
 
 obj-$(CONFIG_BRIDGE_NF_EBTABLES) += ebtables.o
 
@@ -20,6 +22,9 @@ obj-$(CONFIG_BRIDGE_EBT_MARK) += ebt_mark_m.o
 obj-$(CONFIG_BRIDGE_EBT_PKTTYPE) += ebt_pkttype.o
 obj-$(CONFIG_BRIDGE_EBT_STP) += ebt_stp.o
 obj-$(CONFIG_BRIDGE_EBT_VLAN) += ebt_vlan.o
+ifdef BCM_KF # defined(CONFIG_BCM_KF_NETFILTER)
+obj-$(CONFIG_BRIDGE_EBT_TIME) += ebt_time.o
+endif # BCM_KF
 
 # targets
 obj-$(CONFIG_BRIDGE_EBT_ARPREPLY) += ebt_arpreply.o
@@ -27,6 +32,16 @@ obj-$(CONFIG_BRIDGE_EBT_MARK_T) += ebt_mark.o
 obj-$(CONFIG_BRIDGE_EBT_DNAT) += ebt_dnat.o
 obj-$(CONFIG_BRIDGE_EBT_REDIRECT) += ebt_redirect.o
 obj-$(CONFIG_BRIDGE_EBT_SNAT) += ebt_snat.o
+ifdef BCM_KF # defined(CONFIG_BCM_KF_NETFILTER)
+obj-$(CONFIG_BRIDGE_EBT_FTOS_T) += ebt_ftos.o
+obj-$(CONFIG_BRIDGE_EBT_SKIPLOG_T) += ebt_skiplog.o
+obj-$(CONFIG_BRIDGE_EBT_WMM_MARK) += ebt_wmm_mark.o 
+# /* ZyXEL QoS, John (porting from MSTC) */
+obj-$(CONFIG_BRIDGE_EBT_AUTOMAP) += ebt_AUTOMAP.o
+
+# /* ZyXEL QoS, Mark (porting from MSTC) */
+obj-$(CONFIG_BRIDGE_EBT_POLICER) += ebt_policer.o
+endif # BCM_KF # CONFIG_BCM_KF_NETFILTER
 
 # watchers
 obj-$(CONFIG_BRIDGE_EBT_LOG) += ebt_log.o

@@ -86,9 +86,15 @@ struct gen_estimator
 	spinlock_t		*stats_lock;
 	int			ewma_log;
 	u64			last_bytes;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+	u64			last_dropbytes;
+#endif
 	u64			avbps;
 	u32			last_packets;
 	u32			avpps;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+	u32			avdropbps;
+#endif
 	struct rcu_head		e_rcu;
 	struct rb_node		node;
 };
@@ -118,6 +124,9 @@ static void est_timer(unsigned long arg)
 		u64 nbytes;
 		u64 brate;
 		u32 npackets;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		u64 ndropbytes;
+#endif
 		u32 rate;
 
 		spin_lock(e->stats_lock);
@@ -126,12 +135,20 @@ static void est_timer(unsigned long arg)
 			goto skip;
 
 		nbytes = e->bstats->bytes;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		ndropbytes = e->bstats->dropbytes;
+#endif
 		npackets = e->bstats->packets;
 		brate = (nbytes - e->last_bytes)<<(7 - idx);
 		e->last_bytes = nbytes;
 		e->avbps += (brate >> e->ewma_log) - (e->avbps >> e->ewma_log);
 		e->rate_est->bps = (e->avbps+0xF)>>5;
-
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		rate = (ndropbytes - e->last_dropbytes)<<(7 - idx);
+		e->last_dropbytes = ndropbytes;
+		e->avdropbps += ((long)rate - (long)e->avdropbps) >> e->ewma_log;
+		e->rate_est->dropbps = (e->avdropbps+0xF)>>5;
+#endif
 		rate = (npackets - e->last_packets)<<(12 - idx);
 		e->last_packets = npackets;
 		e->avpps += (rate >> e->ewma_log) - (e->avpps >> e->ewma_log);

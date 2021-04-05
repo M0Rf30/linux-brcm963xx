@@ -12,3 +12,13 @@ usbcore-$(CONFIG_PCI)		+= hcd-pci.o
 usbcore-$(CONFIG_USB_DEVICEFS)	+= inode.o
 
 obj-$(CONFIG_USB)		+= usbcore.o
+
+##20130822,TimLiu support USB LED
+ifeq ($(strip $(ZYXEL)),y)
+EXTRA_CFLAGS += -DZYXEL=1
+ifneq ("$(strip ${ZYXEL_PRODUCT})","")
+EXTRA_CFLAGS += -DZYPRJ_$(ZYXEL_PRODUCT)=1
+endif
+
+endif
+

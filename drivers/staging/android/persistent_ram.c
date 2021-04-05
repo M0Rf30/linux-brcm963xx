@@ -20,10 +20,15 @@
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/memblock.h>
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+#include <linux/persistent_ram.h>
+#endif
 #include <linux/rslib.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 #include "persistent_ram.h"
+#endif
 
 struct persistent_ram_buffer {
 	uint32_t    sig;
@@ -34,7 +39,11 @@ struct persistent_ram_buffer {
 
 #define PERSISTENT_RAM_SIG (0x43474244) /* DBGC */
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static __initdata LIST_HEAD(persistent_ram_list);
+#else
+static __devinitdata LIST_HEAD(persistent_ram_list);
+#endif
 
 static inline size_t buffer_size(struct persistent_ram_zone *prz)
 {
@@ -173,7 +182,11 @@ static void persistent_ram_ecc_old(struct persistent_ram_zone *prz)
 }
 
 static int persistent_ram_init_ecc(struct persistent_ram_zone *prz,
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	size_t buffer_size)
+#else
+	size_t buffer_size, struct persistent_ram *ram)
+#endif
 {
 	int numerr;
 	struct persistent_ram_buffer *buffer = prz->buffer;
@@ -182,12 +195,24 @@ static int persistent_ram_init_ecc(struct persistent_ram_zone *prz,
 	if (!prz->ecc)
 		return 0;
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	prz->ecc_block_size = 128;
 	prz->ecc_size = 16;
 	prz->ecc_symsize = 8;
 	prz->ecc_poly = 0x11d;
+#else
+	prz->ecc_block_size = ram->ecc_block_size ?: 128;
+	prz->ecc_size = ram->ecc_size ?: 16;
+	prz->ecc_symsize = ram->ecc_symsize ?: 8;
+	prz->ecc_poly = ram->ecc_poly ?: 0x11d;
+#endif
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	ecc_blocks = DIV_ROUND_UP(prz->buffer_size, prz->ecc_block_size);
+#else
+	ecc_blocks = DIV_ROUND_UP(prz->buffer_size - prz->ecc_size,
+				  prz->ecc_block_size + prz->ecc_size);
+#endif
 	prz->buffer_size -= (ecc_blocks + 1) * prz->ecc_size;
 
 	if (prz->buffer_size > buffer_size) {
@@ -249,7 +274,11 @@ static void notrace persistent_ram_update(struct persistent_ram_zone *prz,
 	persistent_ram_update_ecc(prz, start, count);
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static void __init
+#else
+static void __devinit
+#endif
 persistent_ram_save_old(struct persistent_ram_zone *prz)
 {
 	struct persistent_ram_buffer *buffer = prz->buffer;
@@ -356,8 +385,13 @@ static int persistent_ram_buffer_map(phys_addr_t start, phys_addr_t size,
 	return 0;
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static int __init persistent_ram_buffer_init(const char *name,
 		struct persistent_ram_zone *prz)
+#else
+static int __devinit persistent_ram_buffer_init(const char *name,
+		struct persistent_ram_zone *prz, struct persistent_ram **ramp)
+#endif
 {
 	int i;
 	struct persistent_ram *ram;
@@ -368,9 +402,17 @@ static int __init persistent_ram_buffer_init(const char *name,
 		start = ram->start;
 		for (i = 0; i < ram->num_descs; i++) {
 			desc = &ram->descs[i];
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			if (!strcmp(desc->name, name))
+#else
+			if (!strcmp(desc->name, name)) {
+				*ramp = ram;
+#endif
 				return persistent_ram_buffer_map(start,
 						desc->size, prz);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+			}
+#endif
 			start += desc->size;
 		}
 	}
@@ -378,9 +420,16 @@ static int __init persistent_ram_buffer_init(const char *name,
 	return -EINVAL;
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static  __init
+#else
+static  __devinit
+#endif
 struct persistent_ram_zone *__persistent_ram_init(struct device *dev, bool ecc)
 {
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	struct persistent_ram *ram;
+#endif
 	struct persistent_ram_zone *prz;
 	int ret = -ENOMEM;
 
@@ -392,14 +441,22 @@ struct persistent_ram_zone *__persistent_ram_init(struct device *dev, bool ecc)
 
 	INIT_LIST_HEAD(&prz->node);
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	ret = persistent_ram_buffer_init(dev_name(dev), prz);
+#else
+	ret = persistent_ram_buffer_init(dev_name(dev), prz, &ram);
+#endif
 	if (ret) {
 		pr_err("persistent_ram: failed to initialize buffer\n");
 		goto err;
 	}
 
 	prz->ecc = ecc;
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	ret = persistent_ram_init_ecc(prz, prz->buffer_size);
+#else
+	ret = persistent_ram_init_ecc(prz, prz->buffer_size, ram);
+#endif
 	if (ret)
 		goto err;
 
@@ -407,11 +464,19 @@ struct persistent_ram_zone *__persistent_ram_init(struct device *dev, bool ecc)
 		if (buffer_size(prz) > prz->buffer_size ||
 		    buffer_start(prz) > buffer_size(prz))
 			pr_info("persistent_ram: found existing invalid buffer,"
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 				" size %ld, start %ld\n",
+#else
+				" size %zu, start %zu\n",
+#endif
 			       buffer_size(prz), buffer_start(prz));
 		else {
 			pr_info("persistent_ram: found existing buffer,"
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 				" size %ld, start %ld\n",
+#else
+				" size %zu, start %zu\n",
+#endif
 			       buffer_size(prz), buffer_start(prz));
 			persistent_ram_save_old(prz);
 		}
@@ -430,7 +495,11 @@ err:
 	return ERR_PTR(ret);
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 struct persistent_ram_zone * __init
+#else
+struct persistent_ram_zone * __devinit
+#endif
 persistent_ram_init_ringbuffer(struct device *dev, bool ecc)
 {
 	return __persistent_ram_init(dev, ecc);

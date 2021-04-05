@@ -1043,10 +1043,18 @@ int jffs2_check_oob_empty(struct jffs2_sb_info *c,
 	ops.datbuf = NULL;
 
 	ret = mtd_read_oob(c->mtd, jeb->offset, &ops);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (ret || ops.oobretlen != ops.ooblen) {
+#else
+	if ((ret && !mtd_is_bitflip(ret)) || ops.oobretlen != ops.ooblen) {
+#endif
 		pr_err("cannot read OOB for EB at %08x, requested %zd bytes, read %zd bytes, error %d\n",
 		       jeb->offset, ops.ooblen, ops.oobretlen, ret);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		if (!ret)
+#else
+		if (!ret || mtd_is_bitflip(ret))
+#endif
 			ret = -EIO;
 		return ret;
 	}
@@ -1085,10 +1093,18 @@ int jffs2_check_nand_cleanmarker(struct jffs2_sb_info *c,
 	ops.datbuf = NULL;
 
 	ret = mtd_read_oob(c->mtd, jeb->offset, &ops);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (ret || ops.oobretlen != ops.ooblen) {
+#else
+	if ((ret && !mtd_is_bitflip(ret)) || ops.oobretlen != ops.ooblen) {
+#endif
 		pr_err("cannot read OOB for EB at %08x, requested %zd bytes, read %zd bytes, error %d\n",
 		       jeb->offset, ops.ooblen, ops.oobretlen, ret);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		if (!ret)
+#else
+		if (!ret || mtd_is_bitflip(ret))
+#endif
 			ret = -EIO;
 		return ret;
 	}

@@ -54,7 +54,11 @@ struct tcphdr {
 	__be16	window;
 	__sum16	check;
 	__be16	urg_ptr;
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+} LINUX_NET_PACKED;
+#else
 };
+#endif
 
 /*
  *	The union cast uses a gcc extension to avoid aliasing problems
@@ -64,7 +68,11 @@ struct tcphdr {
 union tcp_word_hdr { 
 	struct tcphdr hdr;
 	__be32 		  words[5];
-}; 
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+} LINUX_NET_PACKED;
+#else
+};
+#endif
 
 #define tcp_flag_word(tp) ( ((union tcp_word_hdr *)(tp))->words [3]) 
 
@@ -106,6 +114,10 @@ enum {
 #define TCP_THIN_LINEAR_TIMEOUTS 16      /* Use linear timeouts for thin streams*/
 #define TCP_THIN_DUPACK         17      /* Fast retrans. after 1 dupack */
 #define TCP_USER_TIMEOUT	18	/* How long for loss retry before timeout */
+
+#if defined(CONFIG_BCM_KF_SPEEDYGET) && defined(CONFIG_BCM_SPEEDYGET)
+#define TCP_NOCOPY          19
+#endif
 
 /* for TCP_INFO socket option */
 #define TCPI_OPT_TIMESTAMPS	1
@@ -472,6 +484,9 @@ struct tcp_sock {
 	 * contains related tcp_cookie_transactions fields.
 	 */
 	struct tcp_cookie_values  *cookie_values;
+#if defined(CONFIG_BCM_KF_SPEEDYGET) && defined(CONFIG_BCM_SPEEDYGET)
+    u8 tcp_nocopy;
+#endif
 };
 
 static inline struct tcp_sock *tcp_sk(const struct sock *sk)

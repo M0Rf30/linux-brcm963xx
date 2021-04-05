@@ -593,7 +593,11 @@ static void ndisc_send_unsol_na(struct net_device *dev)
 {
 	struct inet6_dev *idev;
 	struct inet6_ifaddr *ifa;
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct in6_addr mcaddr;
+#else
+	struct in6_addr mcaddr = IN6ADDR_LINKLOCAL_ALLNODES_INIT;
+#endif
 
 	idev = in6_dev_get(dev);
 	if (!idev)
@@ -601,7 +605,9 @@ static void ndisc_send_unsol_na(struct net_device *dev)
 
 	read_lock_bh(&idev->lock);
 	list_for_each_entry(ifa, &idev->addr_list, if_list) {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		addrconf_addr_solict_mult(&ifa->addr, &mcaddr);
+#endif
 		ndisc_send_na(dev, NULL, &mcaddr, &ifa->addr,
 			      /*router=*/ !!idev->cnf.forwarding,
 			      /*solicited=*/ false, /*override=*/ true,
@@ -1030,8 +1036,12 @@ static void ndisc_recv_rs(struct sk_buff *skb)
 		return;
 	}
 
+#if defined(CONFIG_BCM_KF_IP)
+	if (!idev->cnf.forwarding  || (idev->dev->priv_flags & IFF_WANDEV))
+#else
 	/* Don't accept RS if we're not in router mode */
 	if (!idev->cnf.forwarding)
+#endif
 		goto out;
 
 	/*
@@ -1115,11 +1125,20 @@ errout:
 
 static inline int accept_ra(struct inet6_dev *in6_dev)
 {
+#if defined(CONFIG_BCM_KF_IP)
+	/* WAN interface needs to act like a host. */
+	if (((in6_dev->cnf.forwarding) && 
+		(!(in6_dev->dev->priv_flags & IFF_WANDEV) || 
+		((in6_dev->dev->priv_flags & IFF_WANDEV) && 
+		netdev_path_is_root(in6_dev->dev))))
+		&& (in6_dev->cnf.accept_ra < 2))
+#else
 	/*
 	 * If forwarding is enabled, RA are not accepted unless the special
 	 * hybrid mode (accept_ra=2) is enabled.
 	 */
 	if (in6_dev->cnf.forwarding && in6_dev->cnf.accept_ra < 2)
+#endif
 		return 0;
 
 	return in6_dev->cnf.accept_ra;
@@ -1479,7 +1498,13 @@ static void ndisc_redirect_rcv(struct sk_buff *skb)
 	in6_dev = __in6_dev_get(skb->dev);
 	if (!in6_dev)
 		return;
+#if defined(CONFIG_BCM_KF_IP)
+	/* WAN interface needs to act like a host. */
+	if (((in6_dev->cnf.forwarding) && !(in6_dev->dev->priv_flags & IFF_WANDEV))
+		|| (!in6_dev->cnf.accept_redirects))
+#else
 	if (in6_dev->cnf.forwarding || !in6_dev->cnf.accept_redirects)
+#endif
 		return;
 
 	/* RFC2461 8.1:

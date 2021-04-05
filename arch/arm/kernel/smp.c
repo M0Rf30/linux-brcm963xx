@@ -56,6 +56,9 @@ enum ipi_msg_type {
 	IPI_CALL_FUNC,
 	IPI_CALL_FUNC_SINGLE,
 	IPI_CPU_STOP,
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	IPI_CPU_BACKTRACE,
+#endif
 };
 
 static DECLARE_COMPLETION(cpu_running);
@@ -157,7 +160,15 @@ int __cpu_disable(void)
 	 * Flush user cache and TLB mappings, and then remove this CPU
 	 * from the vm mask set of all processes.
 	 */
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	 /*
+	 * Caches are flushed to the Level of Unification Inner Shareable
+	 * to write-back dirty lines to unified caches shared by all CPUs.
+	 */
+	flush_cache_louis();
+#else
 	flush_cache_all();
+#endif
 	local_flush_tlb_all();
 
 	read_lock(&tasklist_lock);
@@ -205,8 +216,28 @@ void __ref cpu_die(void)
 	local_irq_disable();
 	mb();
 
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	/*
+	 * Flush the data out of the L1 cache for this CPU.  This must be
+	 * before the completion to ensure that data is safely written out
+	 * before platform_cpu_kill() gets called - which may disable
+	 * *this* CPU and power down its cache.
+	 */
+	flush_cache_louis();
+#endif
+
 	/* Tell __cpu_die() that this CPU is now safe to dispose of */
 	complete(&cpu_died);
+
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	/*
+	 * Ensure that the cache lines associated with that completion are
+	 * written out.  This covers the case where _this_ CPU is doing the
+	 * powering down, to ensure that the completion is visible to the
+	 * CPU waiting for this one.
+	 */
+	flush_cache_louis();
+#endif
 
 	/*
 	 * actual CPU shutdown procedure is at least platform (if not
@@ -249,22 +280,47 @@ static void percpu_timer_setup(void);
 asmlinkage void __cpuinit secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	unsigned int cpu;
+
+	/*
+	 * The identity mapping is uncached (strongly ordered), so
+	 * switch away from it before attempting any exclusive accesses.
+	 */
+	cpu_switch_mm(mm->pgd, mm);
+#if defined(CONFIG_BCM_KF_ARM_ERRATA_798181)
+	local_flush_bp_all();
+#endif
+	enter_lazy_tlb(mm, current);
+	local_flush_tlb_all();
+#else
 	unsigned int cpu = smp_processor_id();
+#endif /* CONFIG_BCM_KF_ARM_BCM963XX */
 
 	/*
 	 * All kernel threads share the same mm context; grab a
 	 * reference and switch to it.
 	 */
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	cpu = smp_processor_id();
+#endif
 	atomic_inc(&mm->mm_count);
 	current->active_mm = mm;
 	cpumask_set_cpu(cpu, mm_cpumask(mm));
+#if !defined(CONFIG_BCM_KF_ARM_BCM963XX)
 	cpu_switch_mm(mm->pgd, mm);
 	enter_lazy_tlb(mm, current);
 	local_flush_tlb_all();
+#endif /* CONFIG_BCM_KF_ARM_BCM963XX */
 
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX)
+	cpu_init();
+#endif
 	printk("CPU%u: Booted secondary processor\n", cpu);
 
+#if !defined(CONFIG_BCM_KF_ARM_BCM963XX)
 	cpu_init();
+#endif
 	preempt_disable();
 	trace_hardirqs_off();
 
@@ -383,6 +439,9 @@ static const char *ipi_types[NR_IPI] = {
 	S(IPI_CALL_FUNC, "Function call interrupts"),
 	S(IPI_CALL_FUNC_SINGLE, "Single function call interrupts"),
 	S(IPI_CPU_STOP, "CPU stop interrupts"),
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	S(IPI_CPU_BACKTRACE, "CPU backtrace"),
+#endif
 };
 
 void show_ipi_list(struct seq_file *p, int prec)
@@ -514,6 +573,60 @@ static void ipi_cpu_stop(unsigned int cpu)
 		cpu_relax();
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static cpumask_t backtrace_mask;
+static DEFINE_RAW_SPINLOCK(backtrace_lock);
+
+/* "in progress" flag of arch_trigger_all_cpu_backtrace */
+static unsigned long backtrace_flag;
+
+void smp_send_all_cpu_backtrace(void)
+{
+	unsigned int this_cpu = smp_processor_id();
+	int i;
+
+	if (test_and_set_bit(0, &backtrace_flag))
+		/*
+		 * If there is already a trigger_all_cpu_backtrace() in progress
+		 * (backtrace_flag == 1), don't output double cpu dump infos.
+		 */
+		return;
+
+	cpumask_copy(&backtrace_mask, cpu_online_mask);
+	cpu_clear(this_cpu, backtrace_mask);
+
+	pr_info("Backtrace for cpu %d (current):\n", this_cpu);
+	dump_stack();
+
+	pr_info("\nsending IPI to all other CPUs:\n");
+	smp_cross_call(&backtrace_mask, IPI_CPU_BACKTRACE);
+
+	/* Wait for up to 10 seconds for all other CPUs to do the backtrace */
+	for (i = 0; i < 10 * 1000; i++) {
+		if (cpumask_empty(&backtrace_mask))
+			break;
+		mdelay(1);
+	}
+
+	clear_bit(0, &backtrace_flag);
+	smp_mb__after_clear_bit();
+}
+
+/*
+ * ipi_cpu_backtrace - handle IPI from smp_send_all_cpu_backtrace()
+ */
+static void ipi_cpu_backtrace(unsigned int cpu, struct pt_regs *regs)
+{
+	if (cpu_isset(cpu, backtrace_mask)) {
+		raw_spin_lock(&backtrace_lock);
+		pr_warning("IPI backtrace for cpu %d\n", cpu);
+		show_regs(regs);
+		raw_spin_unlock(&backtrace_lock);
+		cpu_clear(cpu, backtrace_mask);
+	}
+}
+
+#endif
 /*
  * Main handler for inter-processor interrupts
  */
@@ -559,6 +672,12 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		irq_exit();
 		break;
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	case IPI_CPU_BACKTRACE:
+		ipi_cpu_backtrace(cpu, regs);
+		break;
+
+#endif
 	default:
 		printk(KERN_CRIT "CPU%u: Unknown IPI message 0x%x\n",
 		       cpu, ipinr);

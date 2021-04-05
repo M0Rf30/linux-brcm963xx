@@ -345,6 +345,9 @@ int udpv6_recvmsg(struct kiocb *iocb, struct sock *sk,
 	int peeked, off = 0;
 	int err;
 	int is_udplite = IS_UDPLITE(sk);
+#if 1 //Zyxel CVE-2016-10229
+	bool checksum_valid = false;
+#endif
 	int is_udp4;
 	bool slow;
 
@@ -379,11 +382,20 @@ try_again:
 	 */
 
 	if (copied < ulen || UDP_SKB_CB(skb)->partial_cov) {
+#if 1 //Zyxel CVE-2016-10229
+		checksum_valid = !udp_lib_checksum_complete(skb);
+		if (!checksum_valid)
+#else
 		if (udp_lib_checksum_complete(skb))
+#endif
 			goto csum_copy_err;
 	}
 
+#if 1 //Zyxel CVE-2016-10229
+	if (checksum_valid || skb_csum_unnecessary(skb))
+#else
 	if (skb_csum_unnecessary(skb))
+#endif
 		err = skb_copy_datagram_iovec(skb, sizeof(struct udphdr),
 					      msg->msg_iov, copied       );
 	else {

@@ -25,6 +25,9 @@ struct gnet_stats_basic {
 struct gnet_stats_basic_packed {
 	__u64	bytes;
 	__u32	packets;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+	__u64	dropbytes;
+#endif
 } __attribute__ ((packed));
 
 /**
@@ -35,6 +38,9 @@ struct gnet_stats_basic_packed {
 struct gnet_stats_rate_est {
 	__u32	bps;
 	__u32	pps;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+	__u32	dropbps;
+#endif
 };
 
 /**

@@ -198,6 +198,18 @@ static int newque(struct ipc_namespace *ns, struct ipc_params *params)
 		return retval;
 	}
 
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+       msq->q_stime = msq->q_rtime = 0;
+       msq->q_ctime = get_seconds();
+       msq->q_cbytes = msq->q_qnum = 0;
+       msq->q_qbytes = ns->msg_ctlmnb;
+       msq->q_lspid = msq->q_lrpid = 0;
+       INIT_LIST_HEAD(&msq->q_messages);
+       INIT_LIST_HEAD(&msq->q_receivers);
+       INIT_LIST_HEAD(&msq->q_senders);
+#endif
+
+
 	/*
 	 * ipc_addid() locks msq
 	 */
@@ -208,6 +220,7 @@ static int newque(struct ipc_namespace *ns, struct ipc_params *params)
 		return id;
 	}
 
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 	msq->q_stime = msq->q_rtime = 0;
 	msq->q_ctime = get_seconds();
 	msq->q_cbytes = msq->q_qnum = 0;
@@ -216,6 +229,7 @@ static int newque(struct ipc_namespace *ns, struct ipc_params *params)
 	INIT_LIST_HEAD(&msq->q_messages);
 	INIT_LIST_HEAD(&msq->q_receivers);
 	INIT_LIST_HEAD(&msq->q_senders);
+#endif
 
 	msg_unlock(msq);
 
@@ -259,12 +273,20 @@ static void expunge_all(struct msg_queue *msq, int res)
 	while (tmp != &msq->q_receivers) {
 		struct msg_receiver *msr;
 
+		/*
+		 * Make sure that the wakeup doesnt preempt
+		 * this CPU prematurely. (on PREEMPT_RT)
+		 */
+		preempt_disable_rt();
+
 		msr = list_entry(tmp, struct msg_receiver, r_list);
 		tmp = tmp->next;
 		msr->r_msg = NULL;
 		wake_up_process(msr->r_tsk);
 		smp_mb();
 		msr->r_msg = ERR_PTR(res);
+
+		preempt_enable_rt();
 	}
 }
 
@@ -611,6 +633,12 @@ static inline int pipelined_send(struct msg_queue *msq, struct msg_msg *msg)
 		    !security_msg_queue_msgrcv(msq, msg, msr->r_tsk,
 					       msr->r_msgtype, msr->r_mode)) {
 
+			/*
+			 * Make sure that the wakeup doesnt preempt
+			 * this CPU prematurely. (on PREEMPT_RT)
+			 */
+			preempt_disable_rt();
+
 			list_del(&msr->r_list);
 			if (msr->r_maxsize < msg->m_ts) {
 				msr->r_msg = NULL;
@@ -624,9 +652,11 @@ static inline int pipelined_send(struct msg_queue *msq, struct msg_msg *msg)
 				wake_up_process(msr->r_tsk);
 				smp_mb();
 				msr->r_msg = msg;
+				preempt_enable_rt();
 
 				return 1;
 			}
+			preempt_enable_rt();
 		}
 	}
 	return 0;

@@ -37,7 +37,13 @@ static const struct usb_device_id id_table[] = {
 	{DEVICE_G1K(0x04da, 0x250c)},	/* Panasonic Gobi QDL device */
 	{DEVICE_G1K(0x413c, 0x8172)},	/* Dell Gobi Modem device */
 	{DEVICE_G1K(0x413c, 0x8171)},	/* Dell Gobi QDL device */
-	{DEVICE_G1K(0x1410, 0xa001)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa001)},	/* Novatel/Verizon USB-1000 */
+	{DEVICE_G1K(0x1410, 0xa002)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa003)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa004)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa005)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa006)},	/* Novatel Gobi Modem device */
+	{DEVICE_G1K(0x1410, 0xa007)},	/* Novatel Gobi Modem device */
 	{DEVICE_G1K(0x1410, 0xa008)},	/* Novatel Gobi QDL device */
 	{DEVICE_G1K(0x0b05, 0x1776)},	/* Asus Gobi Modem device */
 	{DEVICE_G1K(0x0b05, 0x1774)},	/* Asus Gobi QDL device */
@@ -55,6 +61,7 @@ static const struct usb_device_id id_table[] = {
 	{DEVICE_G1K(0x05c6, 0x9221)},	/* Generic Gobi QDL device */
 	{DEVICE_G1K(0x05c6, 0x9231)},	/* Generic Gobi QDL device */
 	{DEVICE_G1K(0x1f45, 0x0001)},	/* Unknown Gobi QDL device */
+	{DEVICE_G1K(0x1bc7, 0x900e)},	/* Telit Gobi QDL device */
 
 	/* Gobi 2000 devices */
 	{USB_DEVICE(0x1410, 0xa010)},	/* Novatel Gobi 2000 QDL device */
@@ -114,6 +121,16 @@ static const struct usb_device_id id_table[] = {
 	{USB_DEVICE(0x1199, 0x9019)},	/* Sierra Wireless Gobi 3000 Modem device */
 	{USB_DEVICE(0x12D1, 0x14F0)},	/* Sony Gobi 3000 QDL */
 	{USB_DEVICE(0x12D1, 0x14F1)},	/* Sony Gobi 3000 Composite */
+	{USB_DEVICE(0x0AF0, 0x8120)},	/* Option GTM681W */
+
+	{USB_DEVICE_INTERFACE_NUMBER(0x05c6, 0x9025, 0)}, /* QTI EVB diag */
+	{USB_DEVICE_INTERFACE_NUMBER(0x05c6, 0x9025, 2)}, /* QTI EVB modem */
+	{USB_DEVICE_INTERFACE_NUMBER(0x1435, 0xd181, 0)}, /* WNC D18 diag */
+	{USB_DEVICE_INTERFACE_NUMBER(0x1435, 0xd181, 2)}, /* WNC D18 modem */
+	{USB_DEVICE_INTERFACE_NUMBER(0x1435, 0xd191, 0)}, /* WNC D19 diag */
+	{USB_DEVICE_INTERFACE_NUMBER(0x1435, 0xd191, 2)}, /* WNC D19 modem */
+	{USB_DEVICE_INTERFACE_NUMBER(0x1435, 0xd191, 3)}, /* WNC D19 nmea */
+
 	{ }				/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(usb, id_table);
@@ -240,6 +257,23 @@ static int qcprobe(struct usb_serial *serial, const struct usb_device_id *id)
 		break;
 
 	default:
+		/* allow any number of interfaces when doing direct interface match */
+		if (id->match_flags & USB_DEVICE_ID_MATCH_INT_NUMBER) {
+			dev_dbg(&serial->dev->dev, "Generic Qualcomm serial interface found\n");
+			retval = usb_set_interface(serial->dev, ifnum, 0);
+			if (retval < 0) {
+				dev_err(&serial->dev->dev, "Could not set interface, error %d\n", retval);
+				kfree(data);
+				return -ENODEV;
+			}
+			if (intf->desc.bNumEndpoints == 3) {
+				usb_control_msg(serial->dev,
+					usb_rcvctrlpipe(serial->dev, 0), 0x22,
+					0x21, 0x3, ifnum, NULL, 0,
+					USB_CTRL_SET_TIMEOUT);
+			}
+			break;
+		}
 		dev_err(&serial->dev->dev,
 			"unknown number of interfaces: %d\n", nintf);
 		kfree(data);

@@ -137,6 +137,14 @@ struct pid_entry {
 
 static int proc_fd_permission(struct inode *inode, int mask);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+/* ANDROID is for special files in /proc. */
+#define ANDROID(NAME, MODE, OTYPE)			\
+	NOD(NAME, (S_IFREG|(MODE)),			\
+		&proc_##OTYPE##_inode_operations,	\
+		&proc_##OTYPE##_operations, {})
+
+#endif
 /*
  * Count the number of hardlinks for the pid_entry table, excluding the .
  * and .. links.
@@ -821,7 +829,13 @@ static ssize_t environ_read(struct file *file, char __user *buf,
 
 	mm = mm_for_maps(task);
 	ret = PTR_ERR(mm);
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+/*CVE-2016-7916*/
+	/* Ensure the process spawned far enough to have an environment. */
+	if (!mm || IS_ERR(mm) || !mm->env_end)
+#else
 	if (!mm || IS_ERR(mm))
+#endif
 		goto out_free;
 
 	ret = 0;
@@ -969,6 +983,37 @@ out:
 	return err < 0 ? err : count;
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static int oom_adjust_permission(struct inode *inode, int mask)
+{
+	uid_t uid;
+	struct task_struct *p;
+
+	p = get_proc_task(inode);
+	if(p) {
+		uid = task_uid(p);
+		put_task_struct(p);
+	}
+
+	/*
+	 * System Server (uid == 1000) is granted access to oom_adj of all 
+	 * android applications (uid > 10000) as and services (uid >= 1000)
+	 */
+	if (p && (current_fsuid() == 1000) && (uid >= 1000)) {
+		if (inode->i_mode >> 6 & mask) {
+			return 0;
+		}
+	}
+
+	/* Fall back to default. */
+	return generic_permission(inode, mask);
+}
+
+static const struct inode_operations proc_oom_adjust_inode_operations = {
+	.permission	= oom_adjust_permission,
+};
+
+#endif
 static const struct file_operations proc_oom_adjust_operations = {
 	.read		= oom_adjust_read,
 	.write		= oom_adjust_write,
@@ -1266,6 +1311,130 @@ static const struct file_operations proc_pid_sched_operations = {
 };
 
 #endif
+
+#if defined(CONFIG_BCM_KF_SCHEDAUDIT)
+
+void proc_schedaudit_show_task(struct task_struct *p, struct seq_file *m)
+{
+	seq_printf(m, "trig_latency=%u\n", p->bcm_saudit.trig_latency);
+	seq_printf(m, "trig_runtime=%u\n", p->bcm_saudit.trig_runtime);
+	seq_printf(m, "trig_printk=%u\n", p->bcm_saudit.trig_printk);
+	seq_printf(m, "conforming_latency=%u\n", p->bcm_saudit.conforming_latency);
+	seq_printf(m, "conforming_runtime=%u\n", p->bcm_saudit.conforming_runtime);
+	seq_printf(m, "latency_violations=%u\n", p->bcm_saudit.latency_violations);
+	seq_printf(m, "runtime_violations=%u\n", p->bcm_saudit.runtime_violations);
+	seq_printf(m, "max_latency=%u\n", p->bcm_saudit.max_latency);
+	seq_printf(m, "max_runtime=%u\n", p->bcm_saudit.max_runtime);
+}
+EXPORT_SYMBOL(proc_schedaudit_show_task);
+
+void proc_schedaudit_set_task(struct task_struct *p, uint32_t setindex,
+          uint32_t trig_latency, uint32_t trig_runtime, uint32_t trig_printk)
+{
+	if (setindex == 0) {
+		p->bcm_saudit.conforming_latency = 0;
+		p->bcm_saudit.conforming_runtime = 0;
+		p->bcm_saudit.latency_violations = 0;
+		p->bcm_saudit.runtime_violations = 0;
+		p->bcm_saudit.max_latency = 0;
+		p->bcm_saudit.max_runtime = 0;
+	} else if (setindex == 1) {
+		p->bcm_saudit.trig_latency = trig_latency;
+	} else if (setindex == 2) {
+		p->bcm_saudit.trig_runtime = trig_runtime;
+	} else if (setindex == 3) {
+		p->bcm_saudit.trig_printk = trig_printk;
+	}
+}
+EXPORT_SYMBOL(proc_schedaudit_set_task);
+#endif
+
+#if defined(CONFIG_BCM_KF_SCHEDAUDIT)
+/*
+ * Print out various scheduling related per-task fields:
+ */
+static int schedaudit_show(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct task_struct *p;
+
+	p = get_proc_task(inode);
+	if (!p)
+		return -ESRCH;
+	proc_schedaudit_show_task(p, m);
+
+	put_task_struct(p);
+
+	return 0;
+}
+
+static ssize_t
+schedaudit_write(struct file *file, const char __user *buf,
+                 size_t count, loff_t *offset)
+{
+	struct inode *inode = file->f_path.dentry->d_inode;
+	struct task_struct *p;
+	uint32_t setindex=0;
+	uint32_t trig_latency=0;
+	uint32_t trig_runtime=0;
+	uint32_t trig_printk=0;
+	char kbuf[100]={0};
+
+	if (copy_from_user(kbuf, buf, sizeof(kbuf)-1))
+		return -EFAULT;
+
+	p = get_proc_task(inode);
+	if (!p)
+		return -ESRCH;
+
+	if (!strncmp(kbuf, "reset", 5)) {
+		setindex=0;
+	} else if (!strncmp(kbuf, "trig_latency=", 13)) {
+		setindex=1;
+		trig_latency=simple_strtol(&kbuf[13], NULL, 0);
+	} else if (!strncmp(kbuf, "trig_runtime=", 13)) {
+		setindex=2;
+		trig_runtime=simple_strtol(&kbuf[13], NULL, 0);
+	} else if (!strncmp(kbuf, "trig_printk=", 12)) {
+		setindex=3;
+		trig_printk=simple_strtol(&kbuf[12], NULL, 0);
+	} else {
+		printk(KERN_WARNING "invalid input, ignored\n");
+		setindex = 999;
+	}
+
+	if (setindex < 999)
+		proc_schedaudit_set_task(p, setindex,
+                                 trig_latency, trig_runtime, trig_printk);
+
+	put_task_struct(p);
+
+	return count;
+}
+
+static int schedaudit_open(struct inode *inode, struct file *filp)
+{
+	int ret;
+
+	ret = single_open(filp, schedaudit_show, NULL);
+	if (!ret) {
+		struct seq_file *m = filp->private_data;
+
+		m->private = inode;
+	}
+	return ret;
+}
+
+static const struct file_operations proc_pid_schedaudit_operations = {
+	.open		= schedaudit_open,
+	.read		= seq_read,
+	.write		= schedaudit_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+#endif  /* CONFIG_BCM_KF_SCHEDAUDIT */
+
 
 #ifdef CONFIG_SCHED_AUTOGROUP
 /*
@@ -2963,6 +3132,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_SCHED_DEBUG
 	REG("sched",      S_IRUGO|S_IWUSR, proc_pid_sched_operations),
 #endif
+#if defined(CONFIG_BCM_KF_SCHEDAUDIT)
+	REG("bcm_schedaudit",  S_IRUGO|S_IWUSR, proc_pid_schedaudit_operations),
+#endif
 #ifdef CONFIG_SCHED_AUTOGROUP
 	REG("autogroup",  S_IRUGO|S_IWUSR, proc_pid_sched_autogroup_operations),
 #endif
@@ -3011,7 +3183,11 @@ static const struct pid_entry tgid_base_stuff[] = {
 	REG("cgroup",  S_IRUGO, proc_cgroup_operations),
 #endif
 	INF("oom_score",  S_IRUGO, proc_oom_score),
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	REG("oom_adj",    S_IRUGO|S_IWUSR, proc_oom_adjust_operations),
+#else
+	ANDROID("oom_adj",S_IRUGO|S_IWUSR, oom_adjust),
+#endif
 	REG("oom_score_adj", S_IRUGO|S_IWUSR, proc_oom_score_adj_operations),
 #ifdef CONFIG_AUDITSYSCALL
 	REG("loginuid",   S_IWUSR|S_IRUGO, proc_loginuid_operations),
@@ -3324,6 +3500,9 @@ static const struct pid_entry tid_base_stuff[] = {
 	INF("limits",	 S_IRUGO, proc_pid_limits),
 #ifdef CONFIG_SCHED_DEBUG
 	REG("sched",     S_IRUGO|S_IWUSR, proc_pid_sched_operations),
+#endif
+#if defined(CONFIG_BCM_KF_SCHEDAUDIT)
+	REG("bcm_schedaudit",  S_IRUGO|S_IWUSR, proc_pid_schedaudit_operations),
 #endif
 	REG("comm",      S_IRUGO|S_IWUSR, proc_pid_set_comm_operations),
 #ifdef CONFIG_HAVE_ARCH_TRACEHOOK

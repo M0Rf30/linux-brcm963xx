@@ -125,3 +125,10 @@ obj-$(CONFIG_GFS2_FS)           += gfs2/
 obj-y				+= exofs/ # Multiple modules
 obj-$(CONFIG_CEPH_FS)		+= ceph/
 obj-$(CONFIG_PSTORE)		+= pstore/
+
+ifdef BCM_KF # defined(CONFIG_BCM_KF_ANDROID)
+ifneq ($(strip $(CONFIG_BCM_ANDROID)),)
+# Patched by YAFFS
+obj-$(CONFIG_YAFFS_FS)		+= yaffs2/
+endif
+endif # BCM_KF # defined(CONFIG_BCM_KF_ANDROID)

@@ -1,0 +1,39 @@
+#
+# Board-level BSP
+# Preliminary
+#
+
+obj-y	+= irq.o
+obj-$(CONFIG_MACH_BCM963138) += board_963xx.o
+obj-$(CONFIG_MACH_BCM963148) += board_963xx.o
+
+SRCBASE         := $(TOPDIR)
+EXTRA_CFLAGS    += -I$(INC_BRCMBOARDPARMS_PATH)/$(BRCM_BOARD) -I$(SRCBASE)/include -I$(INC_BRCMDRIVER_PUB_PATH)/$(BRCM_BOARD) -I$(INC_BRCMSHARED_PUB_PATH)/$(BRCM_BOARD)
+#EXTRA_CFLAGS    += -I$(INC_ADSLDRV_PATH) -DDBG
+EXTRA_CFLAGS    += -I$(INC_ADSLDRV_PATH) 
+EXTRA_CFLAGS += -g
+EXTRA_CFLAGS += $(BRCM_WERROR_CFLAGS)
+
+ifeq "$(ADSL)" "ANNEX_B"
+EXTRA_CFLAGS += -DADSL_ANNEXB
+endif
+
+ifneq ($(strip $(BUILD_SWMDK)),)
+EXTRA_CFLAGS += -DSUPPORT_SWMDK
+endif
+
+## 20140828, TimLiu Add ZyXEL compile flags.
+ifeq ($(strip ${ZYXEL}),y)
+EXTRA_CFLAGS += -DZYXEL=1
+ifneq ("$(strip ${ZYXEL_PRODUCT})","")
+EXTRA_CFLAGS += -DZYPRJ_$(ZYXEL_PRODUCT)=1
+endif
+ifeq ($(strip ${ZYXEL_PARTITION}),y)
+EXTRA_CFLAGS += -DZYXEL_PARTITION=1
+endif
+ifneq ($(strip ${ZYXEL_SUPPORT_ETHWAN_AS_LAN}),)
+EXTRA_CFLAGS += -DZYXEL_SUPPORT_ETHWAN_AS_LAN=$(ZYXEL_SUPPORT_ETHWAN_AS_LAN)
+endif
+else
+EXTRA_CFLAGS += -DZYXEL=0
+endif

@@ -264,6 +264,12 @@ int ipc_addid(struct ipc_ids* ids, struct kern_ipc_perm* new, int size)
 	rcu_read_lock();
 	spin_lock(&new->lock);
 
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+       current_euid_egid(&euid, &egid);
+       new->cuid = new->uid = euid;
+       new->gid = new->cgid = egid;
+#endif
+
 	err = idr_get_new(&ids->ipcs_idr, new, &id);
 	if (err) {
 		spin_unlock(&new->lock);
@@ -273,9 +279,11 @@ int ipc_addid(struct ipc_ids* ids, struct kern_ipc_perm* new, int size)
 
 	ids->in_use++;
 
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 	current_euid_egid(&euid, &egid);
 	new->cuid = new->uid = euid;
 	new->gid = new->cgid = egid;
+#endif
 
 	new->seq = ids->seq++;
 	if(ids->seq > ids->seq_max)

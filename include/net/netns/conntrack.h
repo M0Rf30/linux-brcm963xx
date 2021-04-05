@@ -15,6 +15,9 @@ struct netns_ct {
 	struct kmem_cache	*nf_conntrack_cachep;
 	struct hlist_nulls_head	*hash;
 	struct hlist_head	*expect_hash;
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	struct hlist_nulls_head	*session_control_table;
+#endif
 	struct hlist_nulls_head	unconfirmed;
 	struct hlist_nulls_head	dying;
 	struct ip_conntrack_stat __percpu *stat;

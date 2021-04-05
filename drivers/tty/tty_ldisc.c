@@ -53,7 +53,7 @@ static void put_ldisc(struct tty_ldisc *ld)
 	 * We really want an "atomic_dec_and_lock_irqsave()",
 	 * but we don't have it, so this does it by hand.
 	 */
-	local_irq_save(flags);
+	local_irq_save_nort(flags);
 	if (atomic_dec_and_lock(&ld->users, &tty_ldisc_lock)) {
 		struct tty_ldisc_ops *ldo = ld->ops;
 
@@ -64,7 +64,7 @@ static void put_ldisc(struct tty_ldisc *ld)
 		kfree(ld);
 		return;
 	}
-	local_irq_restore(flags);
+	local_irq_restore_nort(flags);
 	wake_up(&tty_ldisc_idle);
 }
 
@@ -406,6 +406,12 @@ EXPORT_SYMBOL_GPL(tty_ldisc_flush);
  *	they are not on hot paths so a little discipline won't do
  *	any harm.
  *
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+ *	The line discipline-related tty_struct fields are reset to
+ *	prevent the ldisc driver from re-using stale information for
+ *	the new ldisc instance.
+ *
+#endif
  *	Locking: takes termios_mutex
  */
 
@@ -414,6 +420,11 @@ static void tty_set_termios_ldisc(struct tty_struct *tty, int num)
 	mutex_lock(&tty->termios_mutex);
 	tty->termios->c_line = num;
 	mutex_unlock(&tty->termios_mutex);
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+/*CVE-2015-8964*/
+	tty->disc_data = NULL;
+	tty->receive_room = 0;
+#endif
 }
 
 /**
@@ -658,7 +669,7 @@ int tty_set_ldisc(struct tty_struct *tty, int ldisc)
 		goto enable;
 	}
 
-	if (test_bit(TTY_HUPPED, &tty->flags)) {
+	if (test_bit(TTY_HUPPING, &tty->flags)) {
 		/* We were raced by the hangup method. It will have stomped
 		   the ldisc data and closed the ldisc down */
 		clear_bit(TTY_LDISC_CHANGING, &tty->flags);

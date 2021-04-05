@@ -24,14 +24,67 @@ MODULE_ALIAS("ip6t_mark");
 MODULE_ALIAS("ipt_MARK");
 MODULE_ALIAS("ip6t_MARK");
 
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+#include "skb_defines.h"
+#endif
+
+#if 1 /* ZyXEL QoS, John */
+static unsigned int
+mark_tg(struct sk_buff *skb, const struct xt_action_param *par)
+{
+        const struct xt_mark_tginfo2 *markinfo = par->targinfo;
+	int mark = 0;
+
+	switch (markinfo->mode) {
+                case XT_MARK_SET:
+                        mark = markinfo->mark;
+                        break;
+
+                case XT_MARK_AND:
+                        mark = skb->mark & markinfo->mark;
+                        break;
+
+                case XT_MARK_OR:
+                        mark = skb->mark | markinfo->mark;
+                        break;
+
+                case XT_MARK_VTAG_SET:
+                        mark = skb->mark;
+                        skb->vtag = (unsigned short)(markinfo->mark);
+                        break;
+        }
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+        skb->ipt_check |= IPT_TARGET_MARK;
+        skb->ipt_log.u32[BLOG_ORIGINAL_MARK_INDEX] = skb->mark;
+	skb->ipt_log.u32[BLOG_TARGET_MARK_INDEX] = mark;
+        if ( skb->ipt_check & IPT_TARGET_CHECK )
+                return XT_CONTINUE;
+#endif
+
+        skb->mark = mark;
+        return XT_CONTINUE;
+}
+
+#else
 static unsigned int
 mark_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	const struct xt_mark_tginfo2 *info = par->targinfo;
+    
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_MARK;
+	skb->ipt_log.u32[BLOG_ORIGINAL_MARK_INDEX] = skb->mark;
+	skb->ipt_log.u32[BLOG_TARGET_MARK_INDEX] = (skb->mark & ~info->mask) ^
+	   info->mark;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
 
 	skb->mark = (skb->mark & ~info->mask) ^ info->mark;
 	return XT_CONTINUE;
 }
+#endif
 
 static bool
 mark_mt(const struct sk_buff *skb, struct xt_action_param *par)

@@ -1,0 +1,24 @@
+#
+# For ZYXEL Kernel Compile Flags.
+#
+
+config ZYXEL_NF_SESSION_CTL
+        bool "ZyXEL feature - netfilter session control"
+
+config ZYXEL_PPTP_SUPPORT
+		bool "Support PPTP VPN"
+		
+config I2C_SX9310
+	tristate "Support for I2C SEMTECH SX9310"
+	depends on I2C
+	default n
+
+config SUPPORT_RTK_SWITCH
+	bool "Support Realtek switch"
+	default n
+	help
+	  Use Realtek Switch.
+
+config ZYXEL_USE_LINUX_SIP_ALG
+	bool "Use Linux original SIP ALG"
+	default y

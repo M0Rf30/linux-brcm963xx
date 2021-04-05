@@ -18,6 +18,10 @@
 #include <linux/buffer_head.h> /* for inode_has_buffers */
 #include <linux/ratelimit.h>
 #include "internal.h"
+#if defined(CONFIG_BCM_KF_512MB_DDR) && defined(CONFIG_BCM_512MB_DDR)
+#include "./ubifs/ubifs.h"
+#include <linux/magic.h>
+#endif
 
 /*
  * Inode locking rules:
@@ -164,6 +168,13 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	mapping->a_ops = &empty_aops;
 	mapping->host = inode;
 	mapping->flags = 0;
+
+#if defined(CONFIG_BCM_KF_512MB_DDR) && defined(CONFIG_BCM_512MB_DDR)
+    /* force jffs2 and ubifs to use lowmem */
+    if (sb->s_magic == UBIFS_SUPER_MAGIC || sb->s_magic == JFFS2_SUPER_MAGIC || sb->s_magic == SQUASHFS_MAGIC)
+		mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE & (~__GFP_HIGHMEM));
+	else
+#endif
 	mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE);
 	mapping->assoc_mapping = NULL;
 	mapping->backing_dev_info = &default_backing_dev_info;

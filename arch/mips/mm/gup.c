@@ -1,3 +1,10 @@
+#if (defined(CONFIG_BCM_KF_MIPS_BCM963XX) && defined(CONFIG_MIPS_BCM963XX))
+/* get_user_pages_fast() is not working properly on BMIPS4350, some times wrong
+ * data is seen when the pages returned by this fucntion are used. The problem might
+ * be related to cache flushing. Disabling this architure related function, and
+ * the kernel will fallback to use of get_user_pages(), see mm/util.c
+ */
+#else
 /*
  * Lockless get_user_pages_fast for MIPS
  *
@@ -152,6 +159,10 @@ static int gup_huge_pud(pud_t pud, unsigned long addr, unsigned long end,
 	do {
 		VM_BUG_ON(compound_head(page) != head);
 		pages[*nr] = page;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+		if (PageTail(page))
+			get_huge_page_tail(page);
+#endif
 		(*nr)++;
 		page++;
 		refs++;
@@ -313,3 +324,4 @@ slow_irqon:
 	}
 	return ret;
 }
+#endif

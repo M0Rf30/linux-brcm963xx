@@ -85,6 +85,10 @@
 #include <linux/crypto.h>
 #include <linux/scatterlist.h>
 
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+#include <linux/nbuff.h>
+#endif
+
 int sysctl_tcp_tw_reuse __read_mostly;
 int sysctl_tcp_low_latency __read_mostly;
 EXPORT_SYMBOL(sysctl_tcp_low_latency);
@@ -681,7 +685,12 @@ static void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 	 * routing might fail in this case. using iif for oif to
 	 * make sure we can deliver it
 	 */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	arg.bound_dev_if = sk ? sk->sk_bound_dev_if : inet_iif(skb);
+#else
+	if (sk)
+		arg.bound_dev_if = sk->sk_bound_dev_if;
+#endif
 
 	net = dev_net(skb_dst(skb)->dev);
 	arg.tos = ip_hdr(skb)->tos;
@@ -1523,10 +1532,15 @@ exit:
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENDROPS);
 	return NULL;
 put_and_exit:
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	tcp_clear_xmit_timers(newsk);
 	tcp_cleanup_congestion_control(newsk);
 	bh_unlock_sock(newsk);
 	sock_put(newsk);
+#else
+	inet_csk_prepare_forced_close(newsk);
+	tcp_done(newsk);
+#endif
 	goto exit;
 }
 EXPORT_SYMBOL(tcp_v4_syn_recv_sock);
@@ -1657,6 +1671,146 @@ csum_err:
 }
 EXPORT_SYMBOL(tcp_v4_do_rcv);
 
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+
+static inline struct sk_buff *bcm_find_skb_by_flow_id(uint32_t flowid)
+{
+	/* TODO add this function later,needed for coalescing */
+	return NULL;
+}
+
+static inline void set_skb_fields(FkBuff_t *fkb, struct sk_buff *skb
+	, struct net_device *dev)
+{
+	/*TODO check if we can use skb_dst_set_noref as blog holds reference*/
+	dst_hold(fkb->dst_entry);
+	skb_dst_set(skb, fkb->dst_entry);
+	skb->dev = dev;
+}
+
+
+static inline int position_skb_ptrs_to_transport(struct sk_buff *skb)
+{
+	uint16_t network_offset = BLOG_ETH_HDR_LEN;
+	uint16_t transport_offset = BLOG_ETH_HDR_LEN + BLOG_IPV4_HDR_LEN;
+
+
+	/*initialize ip & tcp header related fields in skb */
+	skb_set_mac_header(skb, 0);
+
+	skb_set_network_header(skb, network_offset);
+
+
+	/*check IP HDR csum */
+	{
+		const struct iphdr *iph = ip_hdr(skb);
+		__u8 iph_ihl = *(__u8 *)iph & 0xf;
+		/*make sure len holds atleast a TCP header with no options */
+		if (unlikely((skb->len < (transport_offset+ 20)) ||
+					ip_fast_csum((u8 *)iph, iph_ihl))){
+			IP_INC_STATS_BH(dev_net(skb->dev), IPSTATS_MIB_INHDRERRORS);
+			return -1;
+		}
+	}
+
+	skb_set_transport_header(skb, transport_offset);/*assumes no ip options*/
+	skb_pull(skb,transport_offset);
+	skb->pkt_type = PACKET_HOST;
+
+	return 0;
+}
+
+
+/* inject the packet into ipv4_tcp_stack  directly from the network driver */
+int bcm_tcp_v4_recv(pNBuff_t pNBuff, struct net_device *dev)
+{
+
+	struct sk_buff *skb;
+	FkBuff_t * fkb;
+
+	if(IS_FKBUFF_PTR(pNBuff))
+	{
+		fkb = PNBUFF_2_FKBUFF(pNBuff);
+		/* Translate the fkb to skb */
+		/* find the skb for flowid or allocate a new skb */
+		skb = bcm_find_skb_by_flow_id(fkb->flowid);
+
+		if(!skb)
+		{
+			skb = skb_xlate_dp(fkb, NULL);
+
+			if(!skb)
+			{
+				nbuff_free(FKBUFF_2_PNBUFF(fkb));
+				return 0;
+			}
+
+			skb->mark=0;
+			skb->priority=0;
+		}
+	}
+	else
+	{
+		skb = PNBUFF_2_SKBUFF(pNBuff);
+		fkb = (FkBuff_t *)&skb->fkbInSkb;
+	}
+
+	set_skb_fields(fkb, skb, dev);
+	if(position_skb_ptrs_to_transport(skb)){
+		kfree_skb(skb);
+		return 0;
+	}
+
+#if ((defined(CONFIG_BCM_KF_RECVFILE) && defined(CONFIG_BCM_RECVFILE)) \
+	&& (defined(CONFIG_BCM963138) || defined(CONFIG_BCM963148)))
+		/* on 63138 & 63148 pkt is invalidated on RX, so we can optimize/reduce
+		 * invaldiation during recycle by setting dirtyp.
+		 * the assumption here is pkt is not modified(not dirty in cache)
+		 * after standard tcp header
+		 */
+		{
+			/*for now just use this for samba ports */
+			uint16_t dport=ntohs(tcp_hdr(skb)->dest);
+
+			if((dport == 139) ||  (dport == 445))
+				skb_shinfo(skb)->dirty_p = skb->data +20;
+		}
+#endif
+
+	 /*
+	 * bh_disable is needed to prevent deadlock on sock_lock when TCP timers 
+	 * are executed
+	 */
+	if(skb)
+	{
+		local_bh_disable();
+		tcp_v4_rcv(skb);
+		local_bh_enable();
+	}
+	return 0;
+}
+EXPORT_SYMBOL(bcm_tcp_v4_recv);
+
+static const struct net_device_ops bcm_tcp4_netdev_ops = {
+	.ndo_open   = NULL,
+	.ndo_stop   = NULL,
+	.ndo_start_xmit  = (HardStartXmitFuncP)bcm_tcp_v4_recv,
+	.ndo_set_mac_address  = NULL,
+	.ndo_do_ioctl   = NULL,
+	.ndo_tx_timeout   = NULL,
+	.ndo_get_stats      = NULL,
+	.ndo_change_mtu     = NULL 
+};
+
+struct net_device  bcm_tcp4_netdev = {
+	.name = "tcp4_netdev",
+	.mtu  = 64*1024,/*set it to 64K incase we aggregate pkts in HW in future */
+	.netdev_ops = &bcm_tcp4_netdev_ops
+};
+
+#endif
+
 /*
  *	From tcp_input.c
  */
@@ -1709,6 +1863,26 @@ int tcp_v4_rcv(struct sk_buff *skb)
 process:
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	/*TODO can we move this deeper into TCP stack*/
+
+	if((sk->sk_state == TCP_ESTABLISHED) && skb->blog_p
+			&& !(skb->dev->priv_flags & IFF_WANDEV) && skb->blog_p->rx.info.phyHdrType == BLOG_ENETPHY)
+	{
+		/*retain the orignal netdev in skb */
+		struct net_device *tmpdev;
+
+		tmpdev = skb->dev;
+		skb->dev = &bcm_tcp4_netdev;
+		skb->data = skb_mac_header(skb);
+		skb->len += 34;
+		blog_emit(skb, tmpdev, TYPE_ETH, 0, BLOG_TCP4_LOCALPHY);
+		skb->dev= tmpdev;
+		skb->data = skb_transport_header(skb);
+		skb->len -= 34;
+	}
+#endif
 
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
 		NET_INC_STATS_BH(net, LINUX_MIB_TCPMINTTLDROP);
