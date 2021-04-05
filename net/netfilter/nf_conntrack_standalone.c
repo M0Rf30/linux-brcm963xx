@@ -32,6 +32,13 @@
 #include <net/netfilter/nf_conntrack_timestamp.h>
 #include <linux/rculist_nulls.h>
 
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+#include <linux/devinfo.h>
+#include <linux/dpistats.h>
+#include <linux/urlinfo.h>
+#include <linux/dpi_ctk.h>
+#endif
+
 MODULE_LICENSE("GPL");
 
 #ifdef CONFIG_NF_CONNTRACK_PROCFS
@@ -168,6 +175,66 @@ ct_show_delta_time(struct seq_file *s, const struct nf_conn *ct)
 }
 #endif
 
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+static int ct_blog_query(struct nf_conn *ct, BlogCtTime_t *ct_time_p)
+{
+	int ret = -1;
+	blog_lock();
+	if (ct->blog_key[BLOG_PARAM1_DIR_ORIG] != BLOG_KEY_NONE || 
+		ct->blog_key[BLOG_PARAM1_DIR_REPLY] != BLOG_KEY_NONE) {
+		blog_query(QUERY_FLOWTRACK, (void*)ct, 
+			ct->blog_key[BLOG_PARAM1_DIR_ORIG],
+			ct->blog_key[BLOG_PARAM1_DIR_REPLY], (uint32_t) ct_time_p);
+		if (ct_time_p->intv != 0) {
+			ret = 0;
+		}
+		else
+		{
+			if (net_ratelimit())
+				printk("Warning: ct_time_p->intv %d ct->blog_key[BLOG_PARAM1_DIR_ORIG %d] 0x%x "
+					"ct->blog_key[BLOG_PARAM1_DIR_REPLY %d] 0x%x\n",
+					ct_time_p->intv, BLOG_PARAM1_DIR_ORIG, ct->blog_key[BLOG_PARAM1_DIR_ORIG], 
+					BLOG_PARAM1_DIR_REPLY, ct->blog_key[BLOG_PARAM1_DIR_REPLY]);
+		}
+	}
+	blog_unlock();
+	return ret;
+}
+
+static inline long ct_blog_calc_timeout(struct nf_conn *ct, 
+		BlogCtTime_t *ct_time_p)
+{
+	long ct_time;
+
+	blog_lock();
+
+	/* When a flow is in flow cache, calculate displayed timout value, using
+	 * the ct timeout value and idle jiffies */
+	if (ct_time_p->flags.valid &&
+		(ct->blog_key[BLOG_PARAM1_DIR_ORIG] != BLOG_KEY_NONE || 
+		ct->blog_key[BLOG_PARAM1_DIR_REPLY] != BLOG_KEY_NONE)) {
+		/* ct timeout value */
+		if (ct->timeout.expires > ct->prev_timeout.expires)
+			ct_time = (long)(ct->timeout.expires - ct->prev_timeout.expires);
+		else
+			ct_time = (long)((ULONG_MAX - ct->prev_timeout.expires) + ct->timeout.expires);
+
+		ct_time = ct_time - ct_time_p->idle_jiffies;
+		
+		if( (ct_time_p->proto == IPPROTO_UDP && test_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+			 || ct_time < 0)
+		{	 
+			 ct_time = (long)(ct_time_p->extra_jiffies- ct_time_p->idle_jiffies);
+		}
+	}
+	else
+		ct_time = (long)(ct->timeout.expires - jiffies);
+
+	blog_unlock();
+	return ct_time;
+}
+#endif
+
 /* return 0 on success, 1 in case of error */
 static int ct_seq_show(struct seq_file *s, void *v)
 {
@@ -176,6 +243,10 @@ static int ct_seq_show(struct seq_file *s, void *v)
 	const struct nf_conntrack_l3proto *l3proto;
 	const struct nf_conntrack_l4proto *l4proto;
 	int ret = 0;
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+    BlogCtTime_t ct_time;
+	long ctExpiryVal = 0;
+#endif
 
 	NF_CT_ASSERT(ct);
 	if (unlikely(!atomic_inc_not_zero(&ct->ct_general.use)))
@@ -191,11 +262,27 @@ static int ct_seq_show(struct seq_file *s, void *v)
 	NF_CT_ASSERT(l4proto);
 
 	ret = -ENOSPC;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+	if (timer_pending(&ct->timeout))
+	{
+		memset(&ct_time, 0, sizeof(ct_time));
+		if (ct_blog_query(ct, &ct_time) == 0)
+		    ctExpiryVal = ct_blog_calc_timeout(ct, &ct_time)/HZ;
+		else
+		   ctExpiryVal = (long)(ct->timeout.expires - jiffies)/HZ;
+	}
+	if (seq_printf(s, "%-8s %u %-8s %u %ld ",
+			   l3proto->name, nf_ct_l3num(ct),
+			   l4proto->name, nf_ct_protonum(ct),
+			   ctExpiryVal) != 0)
+#else
 	if (seq_printf(s, "%-8s %u %-8s %u %ld ",
 		       l3proto->name, nf_ct_l3num(ct),
 		       l4proto->name, nf_ct_protonum(ct),
 		       timer_pending(&ct->timeout)
 		       ? (long)(ct->timeout.expires - jiffies)/HZ : 0) != 0)
+#endif
 		goto release;
 
 	if (l4proto->print_conntrack && l4proto->print_conntrack(s, ct))
@@ -239,6 +326,13 @@ static int ct_seq_show(struct seq_file *s, void *v)
 	if (ct_show_delta_time(s, ct))
 		goto release;
 
+#if defined(CONFIG_BCM_KF_XT_MATCH_LAYER7) && \
+	(defined(CONFIG_NETFILTER_XT_MATCH_LAYER7) || defined(CONFIG_NETFILTER_XT_MATCH_LAYER7_MODULE))
+	if(ct->layer7.app_proto &&
+		seq_printf(s, "l7proto=%s ", ct->layer7.app_proto))
+		return -ENOSPC;
+#endif
+
 	if (seq_printf(s, "use=%u\n", atomic_read(&ct->ct_general.use)))
 		goto release;
 
@@ -269,6 +363,361 @@ static const struct file_operations ct_file_ops = {
 	.release = seq_release_net,
 };
 
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+static void *ct_dpi_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(RCU)
+{
+	struct ct_iter_state *st = seq->private;
+
+	rcu_read_lock();
+	if (*pos == 0)
+		return SEQ_START_TOKEN;
+
+	st->time_now = ktime_to_ns(ktime_get_real());
+	return ct_get_idx(seq, *pos);
+}
+
+static void *ct_dpi_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+    if (v == SEQ_START_TOKEN)
+    {
+        return ct_get_idx(s, *pos);
+    }
+
+	(*pos)++;
+	return ct_get_next(s, v);
+}
+
+static void ct_dpi_seq_stop(struct seq_file *s, void *v)
+	__releases(RCU)
+{
+	rcu_read_unlock();
+}
+
+/* return 0 on success, 1 in case of error */
+static int ct_dpi_seq_show(struct seq_file *s, void *v)
+{
+	struct nf_conntrack_tuple_hash *hash;
+	struct nf_conn *ct;
+	const struct nf_conntrack_l3proto *l3proto;
+	const struct nf_conntrack_l4proto *l4proto;
+	int ret = 0;
+
+	if (v == SEQ_START_TOKEN) {
+		seq_printf(s, "AppID  Mac               Vendor OS Class Type Dev"
+						" UpPkt UpByte UpTS DnPkt DnByte DnTS Status"
+						" UpTuple DnTuple URL\n");
+		return 0;
+	}
+
+	hash = v;
+	ct = nf_ct_tuplehash_to_ctrack(hash);
+
+	NF_CT_ASSERT(ct);
+	if (unlikely(!atomic_inc_not_zero(&ct->ct_general.use)))
+		return 0;
+
+	/* we only want to print DIR_ORIGINAL */
+	if (NF_CT_DIRECTION(hash))
+		goto release;
+
+	ret = -ENOSPC;
+
+	if (ct->dpi.app_id == 0)
+	{
+		ret = 0;
+		goto release;
+	}
+
+	l3proto = __nf_ct_l3proto_find(nf_ct_l3num(ct));
+	NF_CT_ASSERT(l3proto);
+	l4proto = __nf_ct_l4proto_find(nf_ct_l3num(ct), nf_ct_protonum(ct));
+	NF_CT_ASSERT(l4proto);
+
+	if (seq_printf(s, "%08x ", ct->dpi.app_id))
+		goto release;
+
+	if (ct->dpi.dev_key != DEVINFO_IX_INVALID)
+	{
+		uint8_t mac[ETH_ALEN];
+		DevInfoEntry_t entry;
+
+		devinfo_getmac(ct->dpi.dev_key, mac);
+		devinfo_get(ct->dpi.dev_key, &entry);
+
+		if (seq_printf(s, "%02x:%02x:%02x:%02x:%02x:%02x %u %u %u %u %u ",
+					mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+					entry.vendor_id, entry.os_id, entry.class_id,entry.type_id,
+					entry.dev_id))
+			goto release;
+	}
+	else
+	{
+		if (seq_printf(s, "NoMac "))
+			goto release;
+	}
+
+	if (!IS_CTK_INIT_FROM_WAN(ct))
+	{
+		if (seq_print_acct_dpi(s, ct, IP_CT_DIR_ORIGINAL))
+			goto release;
+
+		if (!(test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
+			if (seq_printf(s, "[UNREPLIED] "))
+				goto release;
+
+		if (seq_print_acct_dpi(s, ct, IP_CT_DIR_REPLY))
+			goto release;
+	}
+	else
+	{
+		if (!(test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
+			if (seq_printf(s, "[UNREPLIED] "))
+				goto release;
+
+		if (seq_print_acct_dpi(s, ct, IP_CT_DIR_REPLY))
+			goto release;
+
+		if (seq_print_acct_dpi(s, ct, IP_CT_DIR_ORIGINAL))
+			goto release;
+	}
+
+	if (seq_printf(s, "%x ", ct->dpi.flags))
+		goto release;
+
+	if (print_tuple(s, &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
+			l3proto, l4proto))
+		goto release;
+
+	if (!(test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
+		if (seq_printf(s, "[UNREPLIED] "))
+			goto release;
+
+	if (print_tuple(s, &ct->tuplehash[IP_CT_DIR_REPLY].tuple,
+			l3proto, l4proto))
+		goto release;
+
+	if (ct->dpi.url_id != URLINFO_IX_INVALID)
+	{
+		UrlInfoEntry_t entry;
+
+		urlinfo_get(ct->dpi.url_id, &entry);
+
+		if (seq_printf(s, "%s ", entry.host))
+			goto release;
+	}
+
+	if (seq_printf(s, "\n"))
+		goto release;
+
+	ret = 0;
+release:
+	nf_ct_put(ct);
+	return ret;
+}
+
+static const struct seq_operations ct_dpi_seq_ops = {
+	.start = ct_dpi_seq_start,
+	.next  = ct_dpi_seq_next,
+	.stop  = ct_dpi_seq_stop,
+	.show  = ct_dpi_seq_show
+};
+
+static int ct_dpi_open(struct inode *inode, struct file *file)
+{
+	return seq_open_net(inode, file, &ct_dpi_seq_ops,
+			sizeof(struct ct_iter_state));
+}
+
+static const struct file_operations ct_dpi_file_ops = {
+	.owner   = THIS_MODULE,
+	.open    = ct_dpi_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release_net,
+};
+
+static void *dpi_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	static int statsIdx=0;
+	struct net *net = seq_file_net(seq);
+
+	if (*pos == 0)
+	{
+		dpistats_info(0, NULL); //inform DpiStats module to reset
+		rcu_read_lock();
+		nf_conntrack_dpistat_update(net);
+		rcu_read_unlock();
+		statsIdx = DPISTATS_IX_INVALID;
+	}
+
+	if (statsIdx >= DPISTATS_MAX_ENTRIES)
+		return NULL;
+
+	return &statsIdx;
+}
+
+static void *dpi_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	int *index = (int *)v;
+
+	(*pos)++;
+	(*index)++;
+
+	if (*index >= DPISTATS_MAX_ENTRIES)
+		return NULL;
+
+	return v;
+}
+
+static void dpi_seq_stop(struct seq_file *s, void *v)
+{
+}
+
+/* return 0 on success, 1 in case of error */
+static int dpi_seq_show(struct seq_file *s, void *v)
+{
+	int ret = 0;
+	int *index = (int *)v;
+
+	if (*index == DPISTATS_IX_INVALID) {
+		seq_printf(s, "AppID  Mac               Vendor OS Class Type Dev"
+						" UpPkt UpByte DnPkt DnByte\n");
+		return ret;
+	}
+
+	return dpistats_show(s, *index);
+}
+
+static const struct seq_operations dpi_seq_ops = {
+	.start = dpi_seq_start,
+	.next  = dpi_seq_next,
+	.stop  = dpi_seq_stop,
+	.show  = dpi_seq_show
+};
+
+static int dpi_open(struct inode *inode, struct file *file)
+{
+	return seq_open_net(inode, file, &dpi_seq_ops,
+			sizeof(struct ct_iter_state));
+}
+
+static const struct file_operations dpi_file_ops = {
+	.owner   = THIS_MODULE,
+	.open    = dpi_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release_net,
+};
+#endif
+
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+static struct hlist_nulls_node *sess_ctl_get_first(struct seq_file *seq)
+{
+	struct net *net = seq_file_net(seq);
+	struct ct_iter_state *st = seq->private;
+	struct hlist_nulls_node *n;
+
+	for (st->bucket = 0;
+	     st->bucket < nf_conntrack_htable_size;
+	     st->bucket++) {
+		n = rcu_dereference(net->ct.session_control_table[st->bucket].first);
+		if (!is_a_nulls(n))
+			return n;
+	}
+	return NULL;
+}
+
+static struct hlist_nulls_node *sess_ctl_get_next(struct seq_file *seq, struct hlist_nulls_node *head)
+{
+	struct net *net = seq_file_net(seq);
+	struct ct_iter_state *st = seq->private;
+
+	head = rcu_dereference(head->next);
+	while (is_a_nulls(head)) {
+		if (likely(get_nulls_value(head) == st->bucket)) {
+			if (++st->bucket >= nf_conntrack_htable_size)
+				return NULL;
+		}
+		head = rcu_dereference(net->ct.session_control_table[st->bucket].first);
+	}
+	return head;
+}
+
+static struct hlist_nulls_node *sess_ctl_get_idx(struct seq_file *seq, loff_t pos)
+{
+	struct hlist_nulls_node *head = sess_ctl_get_first(seq);
+
+	if (head)
+		while (pos && (head = sess_ctl_get_next(seq, head)))
+			pos--;
+	return pos ? NULL : head;
+}
+
+static void *sess_ctl_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	spin_lock_bh(&nf_conntrack_lock);
+	return sess_ctl_get_idx(seq, *pos);
+}
+
+static void *sess_ctl_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	(*pos)++;
+	return sess_ctl_get_next(s, v);
+}
+
+static void sess_ctl_seq_stop(struct seq_file *s, void *v)
+{
+	spin_unlock_bh(&nf_conntrack_lock);
+}
+
+/* return 0 on success, 1 in case of error */
+static int sess_ctl_seq_show(struct seq_file *s, void *v)
+{
+	const struct nf_sess_ref_count *hash = v;
+
+	if (seq_printf(s," IP:%u.%u.%u.%u  Session num = %5d  Max=[%d]\n",
+		       NIPQUAD(hash->u3.ip), hash->sess_Cnt, nf_session_ctl_max))
+		return -ENOSPC;
+	return 0;
+}
+
+static const struct seq_operations sess_ctl_seq_ops = {
+	.start = sess_ctl_seq_start,
+	.next  = sess_ctl_seq_next,
+	.stop  = sess_ctl_seq_stop,
+	.show  = sess_ctl_seq_show
+};
+
+static int sess_ctl_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	struct ct_iter_state *st;
+	int ret;
+
+	st = kmalloc(sizeof(struct ct_iter_state), GFP_KERNEL);
+	if (st == NULL)
+		return -ENOMEM;
+	ret = seq_open(file, &sess_ctl_seq_ops);
+	if (ret)
+		goto out_free;
+	seq 		 = file->private_data;
+	seq->private = st;
+	memset(st, 0, sizeof(struct ct_iter_state));
+	return ret;
+out_free:
+	kfree(st);
+	return ret;
+}
+
+static const struct file_operations sess_ctl_file_ops = {
+	.owner   = THIS_MODULE,
+	.open    = sess_ctl_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release_private,
+};
+#endif
 static void *ct_cpu_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	struct net *net = seq_file_net(seq);
@@ -374,8 +823,23 @@ static int nf_conntrack_standalone_init_proc(struct net *net)
 			  &ct_cpu_seq_fops);
 	if (!pde)
 		goto out_stat_nf_conntrack;
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+	pde = proc_net_fops_create(net, "conntrack_dpi", 0440, &ct_dpi_file_ops);
+	if (!pde)
+		goto out_conntrack_dpi;
+	pde = proc_net_fops_create(net, "dpi_stat", 0440, &dpi_file_ops);
+	if (!pde)
+		goto out_dpi_stat;
+#endif
+
 	return 0;
 
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+out_dpi_stat:
+	proc_net_remove(net, "conntrack_dpi");
+out_conntrack_dpi:
+	remove_proc_entry("nf_conntrack", net->proc_net_stat);
+#endif
 out_stat_nf_conntrack:
 	proc_net_remove(net, "nf_conntrack");
 out_nf_conntrack:
@@ -384,6 +848,10 @@ out_nf_conntrack:
 
 static void nf_conntrack_standalone_fini_proc(struct net *net)
 {
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+	proc_net_remove(net, "conntrack_dpi");
+	proc_net_remove(net, "dpi_stat");
+#endif
 	remove_proc_entry("nf_conntrack", net->proc_net_stat);
 	proc_net_remove(net, "nf_conntrack");
 }
@@ -445,6 +913,15 @@ static ctl_table nf_ct_sysctl_table[] = {
 		.extra1		= &log_invalid_proto_min,
 		.extra2		= &log_invalid_proto_max,
 	},
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	{
+		.procname	= "nf_session_ctl_max",
+		.data		= &nf_session_ctl_max,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 	{
 		.procname	= "nf_conntrack_expect_max",
 		.data		= &nf_ct_expect_max,
@@ -499,6 +976,16 @@ static int nf_conntrack_standalone_init_sysctl(struct net *net)
 	if (!net->ct.sysctl_header)
 		goto out_unregister_netfilter;
 
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__,Chi-Hsiang add /proc/net/nf_session_ctl
+	{
+		struct proc_dir_entry *sess_ctl;
+		struct proc_dir_entry *proc_stat;
+		sess_ctl = proc_net_fops_create(net, "nf_session_ctl", 0440, &sess_ctl_file_ops);
+		if (!sess_ctl) goto out_unregister_netfilter;
+		proc_stat = proc_create("nf_session_ctl", S_IRUGO, net->proc_net_stat, &ct_cpu_seq_fops);
+		if (!proc_stat) goto err_3;
+	}
+#endif
 	return 0;
 
 out_unregister_netfilter:
@@ -506,6 +993,10 @@ out_unregister_netfilter:
 out_kmemdup:
 	if (net_eq(net, &init_net))
 		unregister_sysctl_table(nf_ct_netfilter_header);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__,Chi-Hsiang add /proc/net/nf_session_ctl
+err_3:
+	proc_net_remove(net, "nf_session_ctl");
+#endif
 out:
 	printk(KERN_ERR "nf_conntrack: can't register to sysctl.\n");
 	return -ENOMEM;
@@ -519,6 +1010,10 @@ static void nf_conntrack_standalone_fini_sysctl(struct net *net)
 		unregister_sysctl_table(nf_ct_netfilter_header);
 	table = net->ct.sysctl_header->ctl_table_arg;
 	unregister_net_sysctl_table(net->ct.sysctl_header);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__,Chi-Hsiang add /proc/net/nf_session_ctl
+	remove_proc_entry("nf_session_ctl", net->proc_net_stat);
+	proc_net_remove(net, "nf_session_ctl");
+#endif
 	kfree(table);
 }
 #else

@@ -124,6 +124,10 @@ static DEFINE_SPINLOCK(mfc_unres_lock);
 static struct kmem_cache *mrt_cachep __read_mostly;
 
 static struct mr_table *ipmr_new_table(struct net *net, u32 id);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void ipmr_free_table(struct mr_table *mrt);
+
+#endif
 static int ip_mr_forward(struct net *net, struct mr_table *mrt,
 			 struct sk_buff *skb, struct mfc_cache *cache,
 			 int local);
@@ -131,6 +135,9 @@ static int ipmr_cache_report(struct mr_table *mrt,
 			     struct sk_buff *pkt, vifi_t vifi, int assert);
 static int __ipmr_fill_mroute(struct mr_table *mrt, struct sk_buff *skb,
 			      struct mfc_cache *c, struct rtmsg *rtm);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void mroute_clean_tables(struct mr_table *mrt);
+#endif
 static void ipmr_expire_process(unsigned long arg);
 
 #ifdef CONFIG_IP_MROUTE_MULTIPLE_TABLES
@@ -271,7 +278,11 @@ static void __net_exit ipmr_rules_exit(struct net *net)
 
 	list_for_each_entry_safe(mrt, next, &net->ipv4.mr_tables, list) {
 		list_del(&mrt->list);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		kfree(mrt);
+#else
+		ipmr_free_table(mrt);
+#endif
 	}
 	fib_rules_unregister(net->ipv4.mr_rules_ops);
 }
@@ -299,7 +310,11 @@ static int __net_init ipmr_rules_init(struct net *net)
 
 static void __net_exit ipmr_rules_exit(struct net *net)
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	kfree(net->ipv4.mrt);
+#else
+	ipmr_free_table(net->ipv4.mrt);
+#endif
 }
 #endif
 
@@ -336,6 +351,15 @@ static struct mr_table *ipmr_new_table(struct net *net, u32 id)
 	return mrt;
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void ipmr_free_table(struct mr_table *mrt)
+{
+	del_timer_sync(&mrt->ipmr_expire_timer);
+	mroute_clean_tables(mrt);
+	kfree(mrt);
+}
+
+#endif
 /* Service routines creating virtual interfaces: DVMRP tunnels and PIMREG */
 
 static void ipmr_del_tunnel(struct net_device *dev, struct vifctl *v)
@@ -794,6 +818,34 @@ static int vif_add(struct net *net, struct mr_table *mrt,
 	return 0;
 }
 
+#if defined(CONFIG_BCM_KF_IGMP)
+static struct mfc_cache *ipmr_cache_find(struct mr_table *mrt,
+                                         __be32 origin, 
+                                         __be32 mcastgrp,
+                                         vifi_t vifi)
+{
+	int line = MFC_HASH(mcastgrp, origin);
+	struct mfc_cache *c;
+	list_for_each_entry_rcu(c, &mrt->mfc_cache_array[line], list) {
+		if ((c->mfc_origin == origin) && 
+		    (c->mfc_mcastgrp == mcastgrp) &&
+		    (c->mfc_parent == vifi))
+			return c;
+	}
+
+	/* for ASM multicast source does not matter so need to check
+	   for an entry with NULL origin */
+	line = MFC_HASH(mcastgrp, 0x0);
+	list_for_each_entry_rcu(c, &mrt->mfc_cache_array[line], list) {
+		if ((c->mfc_origin == 0x0) && 
+		    (c->mfc_mcastgrp == mcastgrp) &&
+		    (c->mfc_parent == vifi))
+		return c;
+	}
+
+	return NULL;
+}
+#else
 /* called with rcu_read_lock() */
 static struct mfc_cache *ipmr_cache_find(struct mr_table *mrt,
 					 __be32 origin,
@@ -808,6 +860,7 @@ static struct mfc_cache *ipmr_cache_find(struct mr_table *mrt,
 	}
 	return NULL;
 }
+#endif
 
 /*
  *	Allocate a multicast cache entry
@@ -1042,8 +1095,14 @@ static int ipmr_mfc_delete(struct mr_table *mrt, struct mfcctl *mfc)
 	line = MFC_HASH(mfc->mfcc_mcastgrp.s_addr, mfc->mfcc_origin.s_addr);
 
 	list_for_each_entry_safe(c, next, &mrt->mfc_cache_array[line], list) {
+#if defined(CONFIG_BCM_KF_IGMP)
+		if ((c->mfc_origin == mfc->mfcc_origin.s_addr) &&
+		    (c->mfc_mcastgrp == mfc->mfcc_mcastgrp.s_addr) &&
+		    (c->mfc_parent == mfc->mfcc_parent)) {
+#else
 		if (c->mfc_origin == mfc->mfcc_origin.s_addr &&
 		    c->mfc_mcastgrp == mfc->mfcc_mcastgrp.s_addr) {
+#endif
 			list_del_rcu(&c->list);
 
 			ipmr_cache_free(c);
@@ -1066,8 +1125,14 @@ static int ipmr_mfc_add(struct net *net, struct mr_table *mrt,
 	line = MFC_HASH(mfc->mfcc_mcastgrp.s_addr, mfc->mfcc_origin.s_addr);
 
 	list_for_each_entry(c, &mrt->mfc_cache_array[line], list) {
+#if defined(CONFIG_BCM_KF_IGMP)
+		if ((c->mfc_origin == mfc->mfcc_origin.s_addr) &&
+		    (c->mfc_mcastgrp == mfc->mfcc_mcastgrp.s_addr) &&
+		    (c->mfc_parent == mfc->mfcc_parent)) {
+#else
 		if (c->mfc_origin == mfc->mfcc_origin.s_addr &&
 		    c->mfc_mcastgrp == mfc->mfcc_mcastgrp.s_addr) {
+#endif
 			found = true;
 			break;
 		}
@@ -1418,7 +1483,11 @@ int ipmr_ioctl(struct sock *sk, int cmd, void __user *arg)
 			return -EFAULT;
 
 		rcu_read_lock();
+#if defined(CONFIG_BCM_KF_IGMP)
+      c = NULL;
+#else
 		c = ipmr_cache_find(mrt, sr.src.s_addr, sr.grp.s_addr);
+#endif
 		if (c) {
 			sr.pktcnt = c->mfc_un.res.pkt;
 			sr.bytecnt = c->mfc_un.res.bytes;
@@ -1492,7 +1561,11 @@ int ipmr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 			return -EFAULT;
 
 		rcu_read_lock();
+#if defined(CONFIG_BCM_KF_IGMP)
+		c = NULL;
+#else
 		c = ipmr_cache_find(mrt, sr.src.s_addr, sr.grp.s_addr);
+#endif
 		if (c) {
 			sr.pktcnt = c->mfc_un.res.pkt;
 			sr.bytecnt = c->mfc_un.res.bytes;
@@ -1763,8 +1836,15 @@ static int ip_mr_forward(struct net *net, struct mr_table *mrt,
 				struct sk_buff *skb2 = skb_clone(skb, GFP_ATOMIC);
 
 				if (skb2)
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+                                {
+					blog_clone(skb, blog_ptr(skb2));
+#endif
 					ipmr_queue_xmit(net, mrt, skb2, cache,
 							psend);
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+                                }
+#endif
 			}
 			psend = ct;
 		}
@@ -1853,9 +1933,23 @@ int ip_mr_input(struct sk_buff *skb)
 		    }
 	}
 
+#if defined(CONFIG_BCM_KF_IGMP)
+	/* mroute should not apply to IGMP traffic
+	   in addition it does not make sense for TCP protocol to be used
+	   for multicast so just check for UDP */
+	if( ip_hdr(skb)->protocol == IPPROTO_UDP )
+	{
+		vifi_t vifi = ipmr_find_vif(mrt, skb->dev);
+		cache = ipmr_cache_find(mrt, ip_hdr(skb)->saddr, ip_hdr(skb)->daddr, vifi);
+	}
+	else
+	{
+		cache = NULL;
+	}
+#else	
 	/* already under rcu_read_lock() */
 	cache = ipmr_cache_find(mrt, ip_hdr(skb)->saddr, ip_hdr(skb)->daddr);
-
+#endif
 	/*
 	 *	No usable cache entry
 	 */
@@ -1888,13 +1982,28 @@ int ip_mr_input(struct sk_buff *skb)
 	read_unlock(&mrt_lock);
 
 	if (local)
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+        {
+		/* free blog if present */
+		blog_free(skb);
+#endif
 		return ip_local_deliver(skb);
-
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	}
+#endif
 	return 0;
 
 dont_forward:
 	if (local)
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	{
+		/* free blog if present */
+		blog_free(skb);
+#endif
 		return ip_local_deliver(skb);
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	}
+#endif
 	kfree_skb(skb);
 	return 0;
 }
@@ -2039,9 +2148,15 @@ rtattr_failure:
 	return -EMSGSIZE;
 }
 
+#if defined(CONFIG_BCM_KF_IGMP)
+int ipmr_get_route(struct net *net, struct sk_buff *skb,
+		   __be32 saddr, __be32 daddr,
+		   struct rtmsg *rtm, int nowait, int ifIndex)
+#else
 int ipmr_get_route(struct net *net, struct sk_buff *skb,
 		   __be32 saddr, __be32 daddr,
 		   struct rtmsg *rtm, int nowait)
+#endif
 {
 	struct mfc_cache *cache;
 	struct mr_table *mrt;
@@ -2052,7 +2167,30 @@ int ipmr_get_route(struct net *net, struct sk_buff *skb,
 		return -ENOENT;
 
 	rcu_read_lock();
+
+#if defined(CONFIG_BCM_KF_IGMP)
+	/* mroute should not apply to IGMP traffic
+	   in addition it does not make sense for TCP protocol to be used
+	   for multicast so just check for UDP */
+	if ((NULL == skb->dev) || (ip_hdr(skb) == NULL) ||
+	    (ip_hdr(skb)->protocol == IPPROTO_UDP))
+	{
+		struct net_device *dev = dev_get_by_index(net, ifIndex);
+		if (dev) {
+			vifi_t vifi = ipmr_find_vif(mrt, dev);
+			cache = ipmr_cache_find(mrt, saddr, daddr, vifi);
+			dev_put(dev);
+		} else {
+			cache = NULL;
+		}
+	}
+	else
+	{
+		cache = NULL;
+	}
+#else	
 	cache = ipmr_cache_find(mrt, saddr, daddr);
+#endif
 
 	if (cache == NULL) {
 		struct sk_buff *skb2;

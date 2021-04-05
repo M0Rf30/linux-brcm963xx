@@ -379,6 +379,10 @@ struct inodes_stat_t {
 #define SYNC_FILE_RANGE_WRITE		2
 #define SYNC_FILE_RANGE_WAIT_AFTER	4
 
+#if defined(CONFIG_BCM_KF_RECVFILE) && defined(CONFIG_BCM_RECVFILE)
+#define MAX_PAGES_PER_RECVFILE		32
+#endif
+
 #ifdef __KERNEL__
 
 #include <linux/linkage.h>
@@ -974,12 +978,16 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 #define FILE_MNT_WRITE_RELEASED	2
 
 struct file {
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 	/*
 	 * fu_list becomes invalid after file_free is called and queued via
 	 * fu_rcuhead for RCU freeing
 	 */
+#endif
 	union {
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 		struct list_head	fu_list;
+#endif
 		struct rcu_head 	fu_rcuhead;
 	} f_u;
 	struct path		f_path;
@@ -992,8 +1000,10 @@ struct file {
 	 * Must not be taken from IRQ context.
 	 */
 	spinlock_t		f_lock;
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 #ifdef CONFIG_SMP
 	int			f_sb_list_cpu;
+#endif
 #endif
 	atomic_long_t		f_count;
 	unsigned int 		f_flags;
@@ -1441,10 +1451,12 @@ struct super_block {
 
 	struct list_head	s_inodes;	/* all inodes */
 	struct hlist_bl_head	s_anon;		/* anonymous dentries for (nfs) exporting */
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 #ifdef CONFIG_SMP
 	struct list_head __percpu *s_files;
 #else
 	struct list_head	s_files;
+#endif
 #endif
 	struct list_head	s_mounts;	/* list of mounts; _not_ for fs use */
 	/* s_dentry_lru, s_nr_dentry_unused protected by dcache.c lru locks */

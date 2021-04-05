@@ -59,6 +59,10 @@
 #include <linux/mutex.h>
 #include <linux/utsname.h>
 
+#if defined(CONFIG_BCM_KF_USB_STORAGE)
+#include <linux/bcm_realtime.h>
+#endif
+
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
@@ -120,6 +124,17 @@ MODULE_PARM_DESC(quirks, "supplemental list of device IDs and their quirks");
 	.useTransport = use_transport,	\
 }
 
+#define UNUSUAL_VENDOR_INTF(idVendor, cl, sc, pr, \
+		vendor_name, product_name, use_protocol, use_transport, \
+		init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
 static struct us_unusual_dev us_unusual_dev_list[] = {
 #	include "unusual_devs.h" 
 	{ }		/* Terminating entry */
@@ -131,6 +146,7 @@ static struct us_unusual_dev for_dynamic_ids =
 #undef UNUSUAL_DEV
 #undef COMPLIANT_DEV
 #undef USUAL_DEV
+#undef UNUSUAL_VENDOR_INTF
 
 #ifdef CONFIG_LOCKDEP
 
@@ -769,6 +785,14 @@ static int usb_stor_acquire_resources(struct us_data *us)
 				"Unable to start control thread\n");
 		return PTR_ERR(th);
 	}
+#if defined(CONFIG_BCM_KF_USB_STORAGE)
+    /*convert the thread to realtime RR thread */
+    {
+        struct sched_param param;
+        param.sched_priority = BCM_RTPRIO_DATA;
+        sched_setscheduler(th, SCHED_RR, &param);
+    }
+#endif
 	us->ctl_thread = th;
 
 	return 0;

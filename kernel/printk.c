@@ -47,13 +47,6 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
 
-/*
- * Architectures can override it:
- */
-void asmlinkage __attribute__((weak)) early_printk(const char *fmt, ...)
-{
-}
-
 #define __LOG_BUF_LEN	(1 << CONFIG_LOG_BUF_SHIFT)
 
 /* printk's without a loglevel use this.. */
@@ -61,7 +54,11 @@ void asmlinkage __attribute__((weak)) early_printk(const char *fmt, ...)
 
 /* We show everything that is MORE important than this.. */
 #define MINIMUM_CONSOLE_LOGLEVEL 1 /* Minimum loglevel we let people use */
+#if defined(CONFIG_BCM_KF_CONSOLE_LOGLEVEL)
+#define DEFAULT_CONSOLE_LOGLEVEL CONFIG_BCM_DEFAULT_CONSOLE_LOGLEVEL
+#else
 #define DEFAULT_CONSOLE_LOGLEVEL 7 /* anything MORE serious than KERN_DEBUG */
+#endif
 
 DECLARE_WAIT_QUEUE_HEAD(log_wait);
 
@@ -144,6 +141,13 @@ EXPORT_SYMBOL(console_set_on_cmdline);
 
 /* Flag: console code may call schedule() */
 static int console_may_schedule;
+
+#if defined(CONFIG_BCM_KF_PRINTK_INT_ENABLED) 
+int printk_with_interrupt_enabled = 0;
+#if defined(CONFIG_PREEMPT_RT_FULL)
+#define CC_CHECK_PRINTK_RT_FULL 1
+#endif
+#endif
 
 #ifdef CONFIG_PRINTK
 
@@ -293,6 +297,55 @@ static inline void boot_delay_msec(void)
 }
 #endif
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+/*
+ * Return the number of unread characters in the log buffer.
+ */
+static int log_buf_get_len(void)
+{
+	return logged_chars;
+}
+
+/*
+ * Clears the ring-buffer
+ */
+void log_buf_clear(void)
+{
+	logged_chars = 0;
+}
+
+/*
+ * Copy a range of characters from the log buffer.
+ */
+int log_buf_copy(char *dest, int idx, int len)
+{
+	int ret, max;
+	bool took_lock = false;
+
+	if (!oops_in_progress) {
+		raw_spin_lock_irq(&logbuf_lock);
+		took_lock = true;
+	}
+
+	max = log_buf_get_len();
+	if (idx < 0 || idx >= max) {
+		ret = -1;
+	} else {
+		if (len > max - idx)
+			len = max - idx;
+		ret = len;
+		idx += (log_end - max);
+		while (len-- > 0)
+			dest[len] = LOG_BUF(idx + len);
+	}
+
+	if (took_lock)
+		raw_spin_unlock_irq(&logbuf_lock);
+
+	return ret;
+}
+
+#endif
 #ifdef CONFIG_SECURITY_DMESG_RESTRICT
 int dmesg_restrict = 1;
 #else
@@ -514,6 +567,7 @@ static void __call_console_drivers(unsigned start, unsigned end)
 {
 	struct console *con;
 
+	migrate_disable();
 	for_each_console(con) {
 		if (exclusive_console && con != exclusive_console)
 			continue;
@@ -522,7 +576,64 @@ static void __call_console_drivers(unsigned start, unsigned end)
 				(con->flags & CON_ANYTIME)))
 			con->write(con, &LOG_BUF(start), end - start);
 	}
+	migrate_enable();
 }
+
+#ifdef CONFIG_EARLY_PRINTK
+struct console *early_console;
+
+static void early_vprintk(const char *fmt, va_list ap)
+{
+	if (early_console) {
+		char buf[512];
+		int n = vscnprintf(buf, sizeof(buf), fmt, ap);
+
+		early_console->write(early_console, buf, n);
+	}
+}
+
+asmlinkage void early_printk(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	early_vprintk(fmt, ap);
+	va_end(ap);
+}
+
+/*
+ * This is independent of any log levels - a global
+ * kill switch that turns off all of printk.
+ *
+ * Used by the NMI watchdog if early-printk is enabled.
+ */
+static bool __read_mostly printk_killswitch;
+
+static int __init force_early_printk_setup(char *str)
+{
+	printk_killswitch = true;
+	return 0;
+}
+early_param("force_early_printk", force_early_printk_setup);
+
+void printk_kill(void)
+{
+	printk_killswitch = true;
+}
+
+static int forced_early_printk(const char *fmt, va_list ap)
+{
+	if (!printk_killswitch)
+		return 0;
+	early_vprintk(fmt, ap);
+	return 1;
+}
+#else
+static inline int forced_early_printk(const char *fmt, va_list ap)
+{
+	return 0;
+}
+#endif
 
 static bool __read_mostly ignore_loglevel;
 
@@ -638,8 +749,25 @@ static void call_console_drivers(unsigned start, unsigned end)
 	start_print = start;
 	while (cur_index != end) {
 		if (msg_level < 0 && ((end - cur_index) > 2)) {
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+			/*
+			 * prepare buf_prefix, as a contiguous array,
+			 * to be processed by log_prefix function
+			 */
+			char buf_prefix[SYSLOG_PRI_MAX_LENGTH+1];
+			unsigned i;
+			for (i = 0; i < ((end - cur_index)) && (i < SYSLOG_PRI_MAX_LENGTH); i++) {
+				buf_prefix[i] = LOG_BUF(cur_index + i);
+			}
+			buf_prefix[i] = '\0'; /* force '\0' as last string character */
+
+#endif
 			/* strip log prefix */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			cur_index += log_prefix(&LOG_BUF(cur_index), &msg_level, NULL);
+#else
+			cur_index += log_prefix((const char *)&buf_prefix, &msg_level, NULL);
+#endif
 			start_print = cur_index;
 		}
 		while (cur_index != end) {
@@ -790,12 +918,27 @@ static inline int can_use_console(unsigned int cpu)
  * interrupts disabled. It should return with 'lockbuf_lock'
  * released but interrupts still disabled.
  */
-static int console_trylock_for_printk(unsigned int cpu)
+static int console_trylock_for_printk(unsigned int cpu, unsigned long flags)
 	__releases(&logbuf_lock)
 {
 	int retval = 0, wake = 0;
+#if defined(CONFIG_BCM_KF_PRINTK_INT_ENABLED) && (defined(CONFIG_BCM_PRINTK_INT_ENABLED) || defined(CC_CHECK_PRINTK_RT_FULL))
+	int lock = 1;
+	if(printk_with_interrupt_enabled) {
+		lock = !early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
+			!(preempt_count() & 0xffff0000);
+		lock |= oops_in_progress;
+	}
+#else
+#ifdef CONFIG_PREEMPT_RT_FULL
+	int lock = !early_boot_irqs_disabled && !irqs_disabled_flags(flags) &&
+		(preempt_count() <= 1);
+#else
+	int lock = 1;
+#endif
+#endif
 
-	if (console_trylock()) {
+	if (lock && console_trylock()) {
 		retval = 1;
 
 		/*
@@ -845,6 +988,13 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	char *p;
 	size_t plen;
 	char special;
+
+	/*
+	 * Fall back to early_printk if a debugging subsystem has
+	 * killed printk output
+	 */
+	if (unlikely(forced_early_printk(fmt, args)))
+		return 1;
 
 	boot_delay_msec();
 	printk_delay();
@@ -965,8 +1115,25 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	 * will release 'logbuf_lock' regardless of whether it
 	 * actually gets the semaphore or not.
 	 */
-	if (console_trylock_for_printk(this_cpu))
+	if (console_trylock_for_printk(this_cpu, flags)) {
+#if defined(CONFIG_BCM_KF_PRINTK_INT_ENABLED) && (defined(CONFIG_BCM_PRINTK_INT_ENABLED) || defined(CC_CHECK_PRINTK_RT_FULL))
+		if(printk_with_interrupt_enabled) {
+			raw_local_irq_restore(flags);
+			console_unlock();
+			raw_local_irq_save(flags);
+		} else {
+			console_unlock();
+		}
+#else // CONFIG_BCM_KF_PRINTK_INT_ENABLED
+#ifndef CONFIG_PREEMPT_RT_FULL
 		console_unlock();
+#else
+		raw_local_irq_restore(flags);
+		console_unlock();
+		raw_local_irq_save(flags);
+#endif
+#endif // CONFIG_BCM_KF_PRINTK_INT_ENABLED
+	}
 
 	lockdep_on();
 out_restore_irqs:
@@ -984,6 +1151,43 @@ static void call_console_drivers(unsigned start, unsigned end)
 }
 
 #endif
+
+#if defined(CONFIG_BCM_KF_EXTRA_DEBUG)
+
+/* This fucntion is same as printk, but is defined always
+ * and is intended to be used in binary only modules, to avoid
+ * dependency on CONFIG_PRINTK
+ */
+
+int bcm_printk(const char *fmt, ...)
+{
+#ifdef CONFIG_PRINTK
+
+	va_list args;
+	int r;
+
+#ifdef CONFIG_KGDB_KDB
+	if (unlikely(kdb_trap_printk)) {
+		va_start(args, fmt);
+		r = vkdb_printf(fmt, args);
+		va_end(args);
+		return r;
+	}
+#endif
+	va_start(args, fmt);
+	r = vprintk(fmt, args);
+	va_end(args);
+
+	return r;
+#else
+    return 0;
+#endif
+}
+
+EXPORT_SYMBOL(bcm_printk);
+
+#endif
+
 
 static int __add_preferred_console(char *name, int idx, char *options,
 				   char *brl_options)
@@ -1161,7 +1365,9 @@ static int __cpuinit console_cpu_notify(struct notifier_block *self,
 	switch (action) {
 	case CPU_ONLINE:
 	case CPU_DEAD:
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	case CPU_DYING:
+#endif
 	case CPU_DOWN_FAILED:
 	case CPU_UP_CANCELED:
 		console_lock();
@@ -1242,8 +1448,8 @@ void printk_tick(void)
 
 int printk_needs_cpu(int cpu)
 {
-	if (cpu_is_offline(cpu))
-		printk_tick();
+	if (unlikely(cpu_is_offline(cpu)))
+		__this_cpu_write(printk_pending, 0);
 	return __this_cpu_read(printk_pending);
 }
 
@@ -1289,11 +1495,29 @@ again:
 		_con_start = con_start;
 		_log_end = log_end;
 		con_start = log_end;		/* Flush */
+#if defined(CONFIG_BCM_KF_PRINTK_INT_ENABLED) && (defined(CONFIG_BCM_PRINTK_INT_ENABLED) || defined(CC_CHECK_PRINTK_RT_FULL))
+		if(printk_with_interrupt_enabled) {
+			raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+			call_console_drivers(_con_start, _log_end);
+		} else {
+			raw_spin_unlock(&logbuf_lock);
+			stop_critical_timings();	/* don't trace print latency */
+			call_console_drivers(_con_start, _log_end);
+			start_critical_timings();
+			local_irq_restore(flags);
+		}
+#else
+#ifndef CONFIG_PREEMPT_RT_FULL
 		raw_spin_unlock(&logbuf_lock);
 		stop_critical_timings();	/* don't trace print latency */
 		call_console_drivers(_con_start, _log_end);
 		start_critical_timings();
 		local_irq_restore(flags);
+#else
+		raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+		call_console_drivers(_con_start, _log_end);
+#endif
+#endif
 	}
 	console_locked = 0;
 

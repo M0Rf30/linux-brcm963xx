@@ -30,6 +30,10 @@
 /* needed for logical [in,out]-dev filtering */
 #include "../br_private.h"
 
+#if 1 /* ZyXEL QoS, John */
+#include <linux/if_vlan.h>
+#endif
+
 #define BUGPRINT(format, args...) printk("kernel msg: ebtables bug: please "\
 					 "report to author: "format, ## args)
 /* #define BUGPRINT(format, args...) */
@@ -123,10 +127,16 @@ ebt_dev_check(const char *entry, const struct net_device *device)
 
 #define FWINV2(bool,invflg) ((bool) ^ !!(e->invflags & invflg))
 /* process standard matches */
-static inline int
-ebt_basic_match(const struct ebt_entry *e, const struct sk_buff *skb,
+
+#if 0 /* ZyXEL QoS, in order to filter VLAN, John (porting from MSTC) */
+static inline int ebt_basic_match(struct ebt_entry *e, struct ethhdr *h,
+   const struct net_device *in, const struct net_device *out)
+{
+#else
+static inline int ebt_basic_match(struct ebt_entry *e, struct sk_buff *skb,
                 const struct net_device *in, const struct net_device *out)
 {
+#endif
 	const struct ethhdr *h = eth_hdr(skb);
 	const struct net_bridge_port *p;
 	__be16 ethproto;
@@ -137,13 +147,29 @@ ebt_basic_match(const struct ebt_entry *e, const struct sk_buff *skb,
 	else
 		ethproto = h->h_proto;
 
+#if 0 /* ZyXEL QoS, in order to filter VLAN, John (porting from MSTC) */
 	if (e->bitmask & EBT_802_3) {
 		if (FWINV2(ntohs(ethproto) >= 1536, EBT_IPROTO))
 			return 1;
 	} else if (!(e->bitmask & EBT_NOPROTO) &&
 	   FWINV2(e->ethproto != ethproto, EBT_IPROTO))
 		return 1;
-
+#else
+        h = eth_hdr(skb);
+        if (e->bitmask & EBT_802_3) {
+		if (FWINV2(ntohs(h->h_proto) >= 1536, EBT_IPROTO))
+			return 1;
+	} else if (!(e->bitmask & EBT_NOPROTO) ){
+		if(ntohs(e->ethproto) == ETH_P_8021Q && ntohs(ethproto)!=ETH_P_8021Q) {/*If protocol type of rule is 802.1q and packet header is not 802.1q*/
+                     /* for new broadcom vlan device */
+                     if(FWINV2(!(ntohs(((struct vlan_hdr *)(skb->vlan_header))->h_vlan_encapsulated_proto)), EBT_IPROTO))
+		        return 1;
+		}else{
+		     if(FWINV2(e->ethproto != ethproto, EBT_IPROTO))
+			return 1;
+		}
+	}
+#endif
 	if (FWINV2(ebt_dev_check(e->in, in), EBT_IIN))
 		return 1;
 	if (FWINV2(ebt_dev_check(e->out, out), EBT_IOUT))
@@ -219,9 +245,13 @@ unsigned int ebt_do_table (unsigned int hook, struct sk_buff *skb,
 	base = private->entries;
 	i = 0;
 	while (i < nentries) {
+#if 0 /* ZyXEL QoS, in order to filter VLAN, John(porting from MSTC) */
+		if (ebt_basic_match(point, eth_hdr(skb), in, out))
+			goto letscontinue;
+#else
 		if (ebt_basic_match(point, skb, in, out))
 			goto letscontinue;
-
+#endif
 		if (EBT_MATCH_ITERATE(point, ebt_do_match, skb, &acpar) != 0)
 			goto letscontinue;
 		if (acpar.hotdrop) {

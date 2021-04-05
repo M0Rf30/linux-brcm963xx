@@ -840,10 +840,12 @@ static int exec_mmap(struct mm_struct *mm)
 		}
 	}
 	task_lock(tsk);
+	preempt_disable_rt();
 	active_mm = tsk->active_mm;
 	tsk->mm = mm;
 	tsk->active_mm = mm;
 	activate_mm(active_mm, mm);
+	preempt_enable_rt();
 	task_unlock(tsk);
 	arch_pick_mmap_layout(mm);
 	if (old_mm) {
@@ -1114,7 +1116,12 @@ int flush_old_exec(struct linux_binprm * bprm)
 	bprm->mm = NULL;		/* We're using it now */
 
 	set_fs(USER_DS);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	current->flags &= ~(PF_RANDOMIZE | PF_FORKNOEXEC | PF_KTHREAD);
+#else
+	current->flags &=
+		~(PF_RANDOMIZE | PF_FORKNOEXEC | PF_KTHREAD | PF_NOFREEZE);
+#endif
 	flush_thread();
 	current->personality &= ~bprm->per_clear;
 
@@ -1205,9 +1212,28 @@ void free_bprm(struct linux_binprm *bprm)
 		mutex_unlock(&current->signal->cred_guard_mutex);
 		abort_creds(bprm->cred);
 	}
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	/* If a binfmt changed the interp, free it. */
+	if (bprm->interp != bprm->filename)
+		kfree(bprm->interp);
+#endif
 	kfree(bprm);
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+int bprm_change_interp(char *interp, struct linux_binprm *bprm)
+{
+	/* If a binfmt changed the interp, free it first. */
+	if (bprm->interp != bprm->filename)
+		kfree(bprm->interp);
+	bprm->interp = kstrdup(interp, GFP_KERNEL);
+	if (!bprm->interp)
+		return -ENOMEM;
+	return 0;
+}
+EXPORT_SYMBOL(bprm_change_interp);
+
+#endif
 /*
  * install the new credentials for this executable
  */
@@ -1226,6 +1252,47 @@ void install_exec_creds(struct linux_binprm *bprm)
 	mutex_unlock(&current->signal->cred_guard_mutex);
 }
 EXPORT_SYMBOL(install_exec_creds);
+
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+static void bprm_fill_uid(struct linux_binprm *bprm)
+{
+       struct inode *inode;
+       unsigned int mode;
+       uid_t uid;
+       gid_t gid;
+
+       /* clear any previous set[ug]id data from a previous binary */
+       bprm->cred->euid = current_euid();
+       bprm->cred->egid = current_egid();
+
+       if (bprm->file->f_path.mnt->mnt_flags & MNT_NOSUID)
+               return;
+
+       inode = bprm->file->f_path.dentry->d_inode;
+       mode = ACCESS_ONCE(inode->i_mode);
+       if (!(mode & (S_ISUID|S_ISGID)))
+               return;
+
+       /* Be careful if suid/sgid is set */
+       mutex_lock(&inode->i_mutex);
+
+       /* reload atomically mode/uid/gid now that lock held */
+       mode = inode->i_mode;
+       uid = inode->i_uid;
+       gid = inode->i_gid;
+       mutex_unlock(&inode->i_mutex);
+
+       if (mode & S_ISUID) {
+               bprm->per_clear |= PER_CLEAR_ON_SETID;
+               bprm->cred->euid = uid;
+       }
+
+       if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {
+               bprm->per_clear |= PER_CLEAR_ON_SETID;
+               bprm->cred->egid = gid;
+       }
+}
+#endif
 
 /*
  * determine how safe it is to execute the proposed program
@@ -1276,14 +1343,23 @@ static int check_unsafe_exec(struct linux_binprm *bprm)
  */
 int prepare_binprm(struct linux_binprm *bprm)
 {
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+#else
 	umode_t mode;
 	struct inode * inode = bprm->file->f_path.dentry->d_inode;
+#endif
 	int retval;
 
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+#else
 	mode = inode->i_mode;
+#endif
 	if (bprm->file->f_op == NULL)
 		return -EACCES;
 
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+       bprm_fill_uid(bprm);
+#else
 	/* clear any previous set[ug]id data from a previous binary */
 	bprm->cred->euid = current_euid();
 	bprm->cred->egid = current_egid();
@@ -1306,6 +1382,7 @@ int prepare_binprm(struct linux_binprm *bprm)
 			bprm->cred->egid = inode->i_gid;
 		}
 	}
+#endif
 
 	/* fill in binprm security blob */
 	retval = security_bprm_set_creds(bprm);
@@ -1373,6 +1450,12 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 	struct linux_binfmt *fmt;
 	pid_t old_pid, old_vpid;
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	/* This allows 4 levels of binfmt rewrites before failing hard. */
+	if (depth > 5)
+		return -ELOOP;
+
+#endif
 	retval = security_bprm_check(bprm);
 	if (retval)
 		return retval;
@@ -1397,12 +1480,17 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 			if (!try_module_get(fmt->module))
 				continue;
 			read_unlock(&binfmt_lock);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+			bprm->recursion_depth = depth + 1;
+#endif
 			retval = fn(bprm, regs);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			/*
 			 * Restore the depth counter to its starting value
 			 * in this call, so we don't have to rely on every
 			 * load_binary function to restore it on return.
 			 */
+#endif
 			bprm->recursion_depth = depth;
 			if (retval >= 0) {
 				if (depth == 0) {

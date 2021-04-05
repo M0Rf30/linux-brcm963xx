@@ -94,6 +94,11 @@ static void __uart_start(struct tty_struct *tty)
 	struct uart_state *state = tty->driver_data;
 	struct uart_port *port = state->uart_port;
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (port->ops->wake_peer)
+		port->ops->wake_peer(port);
+
+#endif
 	if (!uart_circ_empty(&state->xmit) && state->xmit.buf &&
 	    !tty->stopped && !tty->hw_stopped)
 		port->ops->start_tx(port);
@@ -1739,6 +1744,9 @@ struct baud_rates {
 };
 
 static const struct baud_rates baud_rates[] = {
+#if defined(CONFIG_BCM_KF_ARM_BCM963XX) && defined(CONFIG_BCM63138_SIM)
+	{3000000, B3000000},
+#endif
 	{ 921600, B921600 },
 	{ 460800, B460800 },
 	{ 230400, B230400 },

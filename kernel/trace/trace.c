@@ -414,11 +414,13 @@ EXPORT_SYMBOL_GPL(tracing_is_on);
  */
 void trace_wake_up(void)
 {
+#ifndef CONFIG_PREEMPT_RT_FULL
 	const unsigned long delay = msecs_to_jiffies(2);
 
 	if (trace_flags & TRACE_ITER_BLOCK)
 		return;
 	schedule_delayed_work(&wakeup_work, delay);
+#endif
 }
 
 static int __init set_buf_size(char *str)
@@ -482,6 +484,9 @@ static const char *trace_options[] = {
 	"overwrite",
 	"disable_on_free",
 	"irq-info",
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	"print-tgid",
+#endif
 	NULL
 };
 
@@ -708,7 +713,11 @@ __update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
 void
 update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct ring_buffer *buf = tr->buffer;
+#else
+	struct ring_buffer *buf;
+#endif
 
 	if (trace_stop_count)
 		return;
@@ -720,6 +729,9 @@ update_max_tr(struct trace_array *tr, struct task_struct *tsk, int cpu)
 	}
 	arch_spin_lock(&ftrace_max_lock);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	buf = tr->buffer;
+#endif
 	tr->buffer = max_tr.buffer;
 	max_tr.buffer = buf;
 
@@ -774,6 +786,12 @@ update_max_tr_single(struct trace_array *tr, struct task_struct *tsk, int cpu)
 	arch_spin_unlock(&ftrace_max_lock);
 }
 #endif /* CONFIG_TRACER_MAX_TRACE */
+
+#ifndef CONFIG_PREEMPT_RT_FULL
+static void default_wait_pipe(struct trace_iterator *iter);
+#else
+#define default_wait_pipe	poll_wait_pipe
+#endif
 
 /**
  * register_tracer - register a tracer with the ftrace system.
@@ -970,6 +988,9 @@ void tracing_reset_current_online_cpus(void)
 static unsigned map_pid_to_cmdline[PID_MAX_DEFAULT+1];
 static unsigned map_cmdline_to_pid[SAVED_CMDLINES];
 static char saved_cmdlines[SAVED_CMDLINES][TASK_COMM_LEN];
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static unsigned saved_tgids[SAVED_CMDLINES];
+#endif
 static int cmdline_idx;
 static arch_spinlock_t trace_cmdline_lock = __ARCH_SPIN_LOCK_UNLOCKED;
 
@@ -1117,6 +1138,9 @@ static void trace_save_cmdline(struct task_struct *tsk)
 	}
 
 	memcpy(&saved_cmdlines[idx], tsk->comm, TASK_COMM_LEN);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	saved_tgids[idx] = tsk->tgid;
+#endif
 
 	arch_spin_unlock(&trace_cmdline_lock);
 }
@@ -1152,6 +1176,27 @@ void trace_find_cmdline(int pid, char comm[])
 	preempt_enable();
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+int trace_find_tgid(int pid)
+{
+	unsigned map;
+	int tgid;
+
+	preempt_disable();
+	arch_spin_lock(&trace_cmdline_lock);
+	map = map_pid_to_cmdline[pid];
+	if (map != NO_CMDLINE_MAP)
+		tgid = saved_tgids[map];
+	else
+		tgid = -1;
+
+	arch_spin_unlock(&trace_cmdline_lock);
+	preempt_enable();
+
+	return tgid;
+}
+
+#endif
 void tracing_record_cmdline(struct task_struct *tsk)
 {
 	if (atomic_read(&trace_record_cmdline_disabled) || !tracer_enabled ||
@@ -1179,6 +1224,8 @@ tracing_generic_entry_update(struct trace_entry *entry, unsigned long flags,
 		((pc & HARDIRQ_MASK) ? TRACE_FLAG_HARDIRQ : 0) |
 		((pc & SOFTIRQ_MASK) ? TRACE_FLAG_SOFTIRQ : 0) |
 		(need_resched() ? TRACE_FLAG_NEED_RESCHED : 0);
+
+	entry->migrate_disable	= (tsk) ? __migrate_disabled(tsk) & 0xFF : 0;
 }
 EXPORT_SYMBOL_GPL(tracing_generic_entry_update);
 
@@ -1937,9 +1984,10 @@ static void print_lat_help_header(struct seq_file *m)
 	seq_puts(m, "#                | / _----=> need-resched    \n");
 	seq_puts(m, "#                || / _---=> hardirq/softirq \n");
 	seq_puts(m, "#                ||| / _--=> preempt-depth   \n");
-	seq_puts(m, "#                |||| /     delay             \n");
-	seq_puts(m, "#  cmd     pid   ||||| time  |   caller      \n");
-	seq_puts(m, "#     \\   /      |||||  \\    |   /           \n");
+	seq_puts(m, "#                |||| / _--=> migrate-disable\n");
+	seq_puts(m, "#                ||||| /     delay           \n");
+	seq_puts(m, "#  cmd     pid   |||||| time  |   caller     \n");
+	seq_puts(m, "#     \\   /      |||||  \\   |   /          \n");
 }
 
 static void print_event_info(struct trace_array *tr, struct seq_file *m)
@@ -1960,6 +2008,15 @@ static void print_func_help_header(struct trace_array *tr, struct seq_file *m)
 	seq_puts(m, "#              | |       |          |         |\n");
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void print_func_help_header_tgid(struct trace_array *tr, struct seq_file *m)
+{
+	print_event_info(tr, m);
+	seq_puts(m, "#           TASK-PID    TGID   CPU#      TIMESTAMP  FUNCTION\n");
+	seq_puts(m, "#              | |        |      |          |         |\n");
+}
+
+#endif
 static void print_func_help_header_irq(struct trace_array *tr, struct seq_file *m)
 {
 	print_event_info(tr, m);
@@ -1972,6 +2029,20 @@ static void print_func_help_header_irq(struct trace_array *tr, struct seq_file *
 	seq_puts(m, "#              | |       |   ||||       |         |\n");
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void print_func_help_header_irq_tgid(struct trace_array *tr, struct seq_file *m)
+{
+	print_event_info(tr, m);
+	seq_puts(m, "#                                      _-----=> irqs-off\n");
+	seq_puts(m, "#                                     / _----=> need-resched\n");
+	seq_puts(m, "#                                    | / _---=> hardirq/softirq\n");
+	seq_puts(m, "#                                    || / _--=> preempt-depth\n");
+	seq_puts(m, "#                                    ||| /     delay\n");
+	seq_puts(m, "#           TASK-PID    TGID   CPU#  ||||    TIMESTAMP  FUNCTION\n");
+	seq_puts(m, "#              | |        |      |   ||||       |         |\n");
+}
+
+#endif
 void
 print_trace_header(struct seq_file *m, struct trace_iterator *iter)
 {
@@ -2264,9 +2335,23 @@ void trace_default_header(struct seq_file *m)
 	} else {
 		if (!(trace_flags & TRACE_ITER_VERBOSE)) {
 			if (trace_flags & TRACE_ITER_IRQ_INFO)
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 				print_func_help_header_irq(iter->tr, m);
+#else
+				if (trace_flags & TRACE_ITER_TGID)
+					print_func_help_header_irq_tgid(iter->tr, m);
+				else
+					print_func_help_header_irq(iter->tr, m);
+#endif
 			else
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 				print_func_help_header(iter->tr, m);
+#else
+				if (trace_flags & TRACE_ITER_TGID)
+					print_func_help_header_tgid(iter->tr, m);
+				else
+					print_func_help_header(iter->tr, m);
+#endif
 		}
 	}
 }
@@ -2742,11 +2827,33 @@ static int set_tracer_option(struct tracer *trace, char *cmp, int neg)
 	return -EINVAL;
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static void set_tracer_flags(unsigned int mask, int enabled)
+#else
+/* Some tracers require overwrite to stay enabled */
+int trace_keep_overwrite(struct tracer *tracer, u32 mask, int set)
+{
+	if (tracer->enabled && (mask & TRACE_ITER_OVERWRITE) && !set)
+		return -1;
+
+	return 0;
+}
+
+int set_tracer_flag(unsigned int mask, int enabled)
+#endif
 {
 	/* do nothing if flag is already set */
 	if (!!(trace_flags & mask) == !!enabled)
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		return;
+#else
+		return 0;
+
+	/* Give the tracer a chance to approve the change */
+	if (current_trace->flag_changed)
+		if (current_trace->flag_changed(current_trace, mask, !!enabled))
+			return -EINVAL;
+#endif
 
 	if (enabled)
 		trace_flags |= mask;
@@ -2758,6 +2865,10 @@ static void set_tracer_flags(unsigned int mask, int enabled)
 
 	if (mask == TRACE_ITER_OVERWRITE)
 		ring_buffer_change_overwrite(global_trace.buffer, enabled);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+
+	return 0;
+#endif
 }
 
 static ssize_t
@@ -2767,7 +2878,11 @@ tracing_trace_options_write(struct file *filp, const char __user *ubuf,
 	char buf[64];
 	char *cmp;
 	int neg = 0;
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	int ret;
+#else
+	int ret = -ENODEV;
+#endif
 	int i;
 
 	if (cnt >= sizeof(buf))
@@ -2784,21 +2899,41 @@ tracing_trace_options_write(struct file *filp, const char __user *ubuf,
 		cmp += 2;
 	}
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	mutex_lock(&trace_types_lock);
+
+#endif
 	for (i = 0; trace_options[i]; i++) {
 		if (strcmp(cmp, trace_options[i]) == 0) {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			set_tracer_flags(1 << i, !neg);
+#else
+			ret = set_tracer_flag(1 << i, !neg);
+#endif
 			break;
 		}
 	}
 
 	/* If no option could be set, test the specific tracer options */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (!trace_options[i]) {
 		mutex_lock(&trace_types_lock);
+#else
+	if (!trace_options[i])
+#endif
 		ret = set_tracer_option(current_trace, cmp, neg);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		mutex_unlock(&trace_types_lock);
 		if (ret)
 			return ret;
 	}
+#else
+
+	mutex_unlock(&trace_types_lock);
+
+	if (ret < 0)
+		return ret;
+#endif
 
 	*ppos += cnt;
 
@@ -2898,9 +3033,59 @@ tracing_saved_cmdlines_read(struct file *file, char __user *ubuf,
 }
 
 static const struct file_operations tracing_saved_cmdlines_fops = {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
     .open       = tracing_open_generic,
     .read       = tracing_saved_cmdlines_read,
     .llseek	= generic_file_llseek,
+#else
+	.open	= tracing_open_generic,
+	.read	= tracing_saved_cmdlines_read,
+	.llseek	= generic_file_llseek,
+};
+
+static ssize_t
+tracing_saved_tgids_read(struct file *file, char __user *ubuf,
+				size_t cnt, loff_t *ppos)
+{
+	char *file_buf;
+	char *buf;
+	int len = 0;
+	int pid;
+	int i;
+
+	file_buf = kmalloc(SAVED_CMDLINES*(16+1+16), GFP_KERNEL);
+	if (!file_buf)
+		return -ENOMEM;
+
+	buf = file_buf;
+
+	for (i = 0; i < SAVED_CMDLINES; i++) {
+		int tgid;
+		int r;
+
+		pid = map_cmdline_to_pid[i];
+		if (pid == -1 || pid == NO_CMDLINE_MAP)
+			continue;
+
+		tgid = trace_find_tgid(pid);
+		r = sprintf(buf, "%d %d\n", pid, tgid);
+		buf += r;
+		len += r;
+	}
+
+	len = simple_read_from_buffer(ubuf, cnt, ppos,
+				      file_buf, len);
+
+	kfree(file_buf);
+
+	return len;
+}
+
+static const struct file_operations tracing_saved_tgids_fops = {
+	.open	= tracing_open_generic,
+	.read	= tracing_saved_tgids_read,
+	.llseek	= generic_file_llseek,
+#endif
 };
 
 static ssize_t
@@ -3122,6 +3307,11 @@ static int tracing_set_tracer(const char *buf)
 		goto out;
 
 	trace_branch_disable();
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+
+	current_trace->enabled = false;
+
+#endif
 	if (current_trace && current_trace->reset)
 		current_trace->reset(tr);
 	if (current_trace && current_trace->use_max_tr) {
@@ -3151,6 +3341,9 @@ static int tracing_set_tracer(const char *buf)
 			goto out;
 	}
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	current_trace->enabled = true;
+#endif
 	trace_branch_enable(tr);
  out:
 	mutex_unlock(&trace_types_lock);
@@ -3302,6 +3495,7 @@ static int tracing_release_pipe(struct inode *inode, struct file *file)
 	return 0;
 }
 
+#ifndef CONFIG_PREEMPT_RT_FULL
 static unsigned int
 tracing_poll_pipe(struct file *filp, poll_table *poll_table)
 {
@@ -3323,8 +3517,7 @@ tracing_poll_pipe(struct file *filp, poll_table *poll_table)
 	}
 }
 
-
-void default_wait_pipe(struct trace_iterator *iter)
+static void default_wait_pipe(struct trace_iterator *iter)
 {
 	DEFINE_WAIT(wait);
 
@@ -3335,6 +3528,20 @@ void default_wait_pipe(struct trace_iterator *iter)
 
 	finish_wait(&trace_wait, &wait);
 }
+#else
+static unsigned int
+tracing_poll_pipe(struct file *filp, poll_table *poll_table)
+{
+	struct trace_iterator *iter = filp->private_data;
+
+	if ((trace_flags & TRACE_ITER_BLOCK) || !trace_empty(iter))
+		return POLLIN | POLLRDNORM;
+	poll_wait_pipe(iter);
+	if (!trace_empty(iter))
+		return POLLIN | POLLRDNORM;
+	return 0;
+}
+#endif
 
 /*
  * This is a make-shift waitqueue.
@@ -4485,7 +4692,17 @@ trace_options_core_write(struct file *filp, const char __user *ubuf, size_t cnt,
 
 	if (val != 0 && val != 1)
 		return -EINVAL;
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	set_tracer_flags(1 << index, val);
+#else
+
+	mutex_lock(&trace_types_lock);
+	ret = set_tracer_flag(1 << index, val);
+	mutex_unlock(&trace_types_lock);
+
+	if (ret < 0)
+		return ret;
+#endif
 
 	*ppos += cnt;
 
@@ -4736,6 +4953,11 @@ static __init int tracer_init_debugfs(void)
 	trace_create_file("saved_cmdlines", 0444, d_tracer,
 			NULL, &tracing_saved_cmdlines_fops);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	trace_create_file("saved_tgids", 0444, d_tracer,
+			NULL, &tracing_saved_tgids_fops);
+
+#endif
 	trace_create_file("trace_clock", 0644, d_tracer, NULL,
 			  &trace_clock_fops);
 

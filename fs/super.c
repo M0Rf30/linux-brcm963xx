@@ -120,6 +120,7 @@ static struct super_block *alloc_super(struct file_system_type *type)
 			s = NULL;
 			goto out;
 		}
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 #ifdef CONFIG_SMP
 		s->s_files = alloc_percpu(struct list_head);
 		if (!s->s_files) {
@@ -135,6 +136,7 @@ static struct super_block *alloc_super(struct file_system_type *type)
 		}
 #else
 		INIT_LIST_HEAD(&s->s_files);
+#endif
 #endif
 		s->s_bdi = &default_backing_dev_info;
 		INIT_HLIST_NODE(&s->s_instances);
@@ -198,8 +200,10 @@ out:
  */
 static inline void destroy_super(struct super_block *s)
 {
+#if !defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
 #ifdef CONFIG_SMP
 	free_percpu(s->s_files);
+#endif
 #endif
 	security_sb_free(s);
 	WARN_ON(!list_empty(&s->s_mounts));
@@ -747,7 +751,12 @@ int do_remount_sb(struct super_block *sb, int flags, void *data, int force)
 	   make sure there are no rw files opened */
 	if (remount_ro) {
 		if (force) {
+#if defined(CONFIG_BCM_KF_MISC_3_4_CVE_PORTS)
+                       sb->s_readonly_remount = 1;
+                       smp_wmb();
+#else
 			mark_files_ro(sb);
+#endif
 		} else {
 			retval = sb_prepare_remount_readonly(sb);
 			if (retval)

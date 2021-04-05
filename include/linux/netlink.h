@@ -29,6 +29,26 @@
 
 #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
 
+#if defined(CONFIG_BCM_KF_NETFILTER)
+#define NETLINK_BRCM_MONITOR 25 /*send events to userspace monitor task(broadcom specific)*/
+#define NETLINK_BRCM_EPON       26
+#endif
+#if defined(CONFIG_BCM_KF_MLD) || defined(CONFIG_BCM_KF_IGMP)
+#define NETLINK_MCPD            30       /* for multicast */
+#endif
+
+#if defined(CONFIG_BCM_KF_WL)
+#define NETLINK_WLCSM            31       /*  for brcm wireless cfg[nvram]/statics/management extention */
+#endif
+
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+#define NETLINK_DPI            27       /* for dpictl */
+#endif
+
+#if defined(CONFIG_RMNET_DATA)
+#define RMNET_NETLINK_PROTO 24
+#endif
+
 #define MAX_LINKS 32		
 
 struct sockaddr_nl {
@@ -153,6 +173,9 @@ struct nlattr {
 
 #include <linux/capability.h>
 #include <linux/skbuff.h>
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+#include <linux/export.h>
+#endif
 
 struct net;
 
@@ -210,10 +233,14 @@ int netlink_sendskb(struct sock *sk, struct sk_buff *skb);
  *	use enormous buffer sizes on recvmsg() calls just to avoid
  *	MSG_TRUNC when PAGE_SIZE is very large.
  */
+#if defined(CONFIG_BCM_KF_512MB_DDR) && defined(CONFIG_BCM_512MB_DDR)
+#define NLMSG_GOODSIZE	SKB_WITH_OVERHEAD(4096UL)
+#else
 #if PAGE_SIZE < 8192UL
 #define NLMSG_GOODSIZE	SKB_WITH_OVERHEAD(PAGE_SIZE)
 #else
 #define NLMSG_GOODSIZE	SKB_WITH_OVERHEAD(8192UL)
+#endif
 #endif
 
 #define NLMSG_DEFAULT_SIZE (NLMSG_GOODSIZE - NLMSG_HDRLEN)
@@ -226,6 +253,10 @@ struct netlink_callback {
 					struct netlink_callback *cb);
 	int			(*done)(struct netlink_callback *cb);
 	void			*data;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	/* the module that dump function belong to */
+	struct module		*module;
+#endif
 	u16			family;
 	u16			min_dump_alloc;
 	unsigned int		prev_seq, seq;
@@ -253,12 +284,30 @@ struct netlink_dump_control {
 	int (*dump)(struct sk_buff *skb, struct netlink_callback *);
 	int (*done)(struct netlink_callback*);
 	void *data;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	struct module *module;
+#endif
 	u16 min_dump_alloc;
 };
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 extern int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 			      const struct nlmsghdr *nlh,
 			      struct netlink_dump_control *control);
+#else
+extern int __netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
+				const struct nlmsghdr *nlh,
+				struct netlink_dump_control *control);
+static inline int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
+				     const struct nlmsghdr *nlh,
+				     struct netlink_dump_control *control)
+{
+	if (!control->module)
+		control->module = THIS_MODULE;
+
+	return __netlink_dump_start(ssk, skb, nlh, control);
+}
+#endif
 
 
 #define NL_NONROOT_RECV 0x1

@@ -248,8 +248,16 @@ get_unique_tuple(struct nf_conntrack_tuple *tuple,
 	/* Only bother mapping if it's not already in range and unique */
 	if (!(range->flags & NF_NAT_RANGE_PROTO_RANDOM)) {
 		if (range->flags & NF_NAT_RANGE_PROTO_SPECIFIED) {
+#if 1 /* Support one-to-one port mapping. __TELEFONICA__, ZyXEL Stan Su, 20120308. */
+	     /* If external port range is 1000-2000, and internal port range is 1500-2500. */
+	     /* In this case, in_range() will return trun when the incoming traffic uses port 1555. */
+	     /* Therefore, only check in_range() when mappingFlag is false. */
+	     if((!range->mappingFlag && proto->in_range(tuple, maniptype, &range->min, &range->max)) &&
+#else
+
 			if (proto->in_range(tuple, maniptype, &range->min,
 					    &range->max) &&
+#endif
 			    (range->min.all == range->max.all ||
 			     !nf_nat_used_tuple(tuple, ct)))
 				goto out;

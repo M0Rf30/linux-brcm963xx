@@ -215,9 +215,11 @@ typedef enum {
 #define NAND_SUBPAGE_READ(chip) ((chip->ecc.mode == NAND_ECC_SOFT) \
 					&& (chip->page_shift > 9))
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 /* Mask to zero out the chip options, which come from the id table */
 #define NAND_CHIPOPTIONS_MSK	(0x0000ffff & ~NAND_NO_AUTOINCR)
 
+#endif
 /* Non chip related options */
 /* This option skips the bbt scan during initialization. */
 #define NAND_SKIP_BBTSCAN	0x00010000
@@ -228,6 +230,11 @@ typedef enum {
 #define NAND_OWN_BUFFERS	0x00020000
 /* Chip may not exist, so silence any errors in scan */
 #define NAND_SCAN_SILENT_NODEV	0x00040000
+
+#if defined(CONFIG_BCM_KF_MTD_BCMNAND)
+/* For Hynix MLC flashes, the BI are written to last and (last-2) pages. */
+#define NAND_SCAN_BI_3RD_PAGE   0x00100000
+#endif
 
 /* Options set by nand scan */
 /* Nand scan has allocated controller struct */
@@ -559,6 +566,9 @@ struct nand_chip {
 #define NAND_MFR_MICRON		0x2c
 #define NAND_MFR_AMD		0x01
 #define NAND_MFR_MACRONIX	0xc2
+#if defined(CONFIG_BCM_KF_NAND)
+#define NAND_MFR_GIGADEVICE	0xc8
+#endif
 
 /**
  * struct nand_flash_dev - NAND Flash Device ID Structure

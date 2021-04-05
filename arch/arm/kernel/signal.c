@@ -617,6 +617,9 @@ static void do_signal(struct pt_regs *regs, int syscall)
 	if (!user_mode(regs))
 		return;
 
+	local_irq_enable();
+	preempt_check_resched();
+
 	/*
 	 * If we were from a system call, check for system call restarting...
 	 */
@@ -642,7 +645,11 @@ static void do_signal(struct pt_regs *regs, int syscall)
 		}
 	}
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (try_to_freeze())
+#else
+	if (try_to_freeze_nowarn())
+#endif
 		goto no_signal;
 
 	/*

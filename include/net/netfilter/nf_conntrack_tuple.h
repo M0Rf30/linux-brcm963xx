@@ -61,6 +61,12 @@ struct nf_conntrack_tuple {
 			struct {
 				__be16 key;
 			} gre;
+#if defined(CONFIG_BCM_KF_PROTO_ESP) && \
+	(defined(CONFIG_NF_CT_PROTO_ESP) || defined(CONFIG_NF_CT_PROTO_ESP_MODULE))
+			struct {
+				__be16 spi;
+			} esp;
+#endif
 		} u;
 
 		/* The protocol. */
@@ -119,7 +125,16 @@ struct nf_conntrack_tuple_hash {
 	struct hlist_nulls_node hnnode;
 	struct nf_conntrack_tuple tuple;
 };
-
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+/* Hash table for sess_ref_count. Store ilp and it count.
+   and ilp is comes from " ct.[original].src " */
+struct nf_sess_ref_count
+{
+	struct hlist_nulls_node hnnode;
+	union nf_inet_addr u3;
+	u_int32_t sess_Cnt;
+};
+#endif
 static inline bool __nf_ct_tuple_src_equal(const struct nf_conntrack_tuple *t1,
 					   const struct nf_conntrack_tuple *t2)
 { 

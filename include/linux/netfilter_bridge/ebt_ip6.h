@@ -21,10 +21,19 @@
 #define EBT_IP6_SPORT 0x10
 #define EBT_IP6_DPORT 0x20
 #define EBT_IP6_ICMP6 0x40
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+#define EBT_IP6_LENGTH 0x80
+#endif
 
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+#define EBT_IP6_MASK (EBT_IP6_SOURCE | EBT_IP6_DEST | EBT_IP6_TCLASS |\
+		      EBT_IP6_PROTO | EBT_IP6_SPORT | EBT_IP6_DPORT | \
+		      EBT_IP6_ICMP6 | EBT_IP6_LENGTH)
+#else
 #define EBT_IP6_MASK (EBT_IP6_SOURCE | EBT_IP6_DEST | EBT_IP6_TCLASS |\
 		      EBT_IP6_PROTO | EBT_IP6_SPORT | EBT_IP6_DPORT | \
 		      EBT_IP6_ICMP6)
+#endif
 #define EBT_IP6_MATCH "ip6"
 
 /* the same values are used for the invflags */
@@ -45,6 +54,9 @@ struct ebt_ip6_info {
 		__u16 dport[2];
 		__u8 icmpv6_code[2];
 	};
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+	__u16 length[2];
+#endif
 };
 
 #endif

@@ -37,6 +37,7 @@
 #include <linux/rculist_bl.h>
 #include <linux/prefetch.h>
 #include <linux/ratelimit.h>
+#include <linux/delay.h>
 #include "internal.h"
 #include "mount.h"
 
@@ -373,7 +374,11 @@ static struct dentry *d_kill(struct dentry *dentry, struct dentry *parent)
 	 * Inform try_to_ascend() that we are no longer attached to the
 	 * dentry tree
 	 */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	dentry->d_flags |= DCACHE_DISCONNECTED;
+#else
+	dentry->d_flags |= DCACHE_DENTRY_KILLED;
+#endif
 	if (parent)
 		spin_unlock(&parent->d_lock);
 	dentry_iput(dentry);
@@ -472,7 +477,7 @@ static inline struct dentry *dentry_kill(struct dentry *dentry, int ref)
 	if (inode && !spin_trylock(&inode->i_lock)) {
 relock:
 		spin_unlock(&dentry->d_lock);
-		cpu_relax();
+		cpu_chill();
 		return dentry; /* try again with same dentry */
 	}
 	if (IS_ROOT(dentry))
@@ -858,7 +863,7 @@ relock:
 
 		if (!spin_trylock(&dentry->d_lock)) {
 			spin_unlock(&dcache_lru_lock);
-			cpu_relax();
+			cpu_chill();
 			goto relock;
 		}
 
@@ -1030,7 +1035,11 @@ static struct dentry *try_to_ascend(struct dentry *old, int locked, unsigned seq
 	 * or deletion
 	 */
 	if (new != old->d_parent ||
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		 (old->d_flags & DCACHE_DISCONNECTED) ||
+#else
+		 (old->d_flags & DCACHE_DENTRY_KILLED) ||
+#endif
 		 (!locked && read_seqretry(&rename_lock, seq))) {
 		spin_unlock(&new->d_lock);
 		new = NULL;
@@ -1116,6 +1125,10 @@ positive:
 	return 1;
 
 rename_retry:
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (locked)
+		goto again;
+#endif
 	locked = 1;
 	write_seqlock(&rename_lock);
 	goto again;
@@ -1218,6 +1231,10 @@ out:
 rename_retry:
 	if (found)
 		return found;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (locked)
+		goto again;
+#endif
 	locked = 1;
 	write_seqlock(&rename_lock);
 	goto again;
@@ -2040,7 +2057,7 @@ again:
 	if (dentry->d_count == 1) {
 		if (inode && !spin_trylock(&inode->i_lock)) {
 			spin_unlock(&dentry->d_lock);
-			cpu_relax();
+			cpu_chill();
 			goto again;
 		}
 		dentry->d_flags &= ~DCACHE_CANT_MOUNT;
@@ -2963,6 +2980,10 @@ resume:
 	return;
 
 rename_retry:
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (locked)
+		goto again;
+#endif
 	locked = 1;
 	write_seqlock(&rename_lock);
 	goto again;

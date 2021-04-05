@@ -483,7 +483,11 @@ static int pppoe_disc_rcv(struct sk_buff *skb, struct net_device *dev,
 		goto abort;
 
 	ph = pppoe_hdr(skb);
+#if defined(CONFIG_BCM_KF_PPP)
+	if ((ph->code != PADT_CODE) || (ph->sid))
+#else
 	if (ph->code != PADT_CODE)
+#endif /* CONFIG_BCM_KF_PPP */
 		goto abort;
 
 	pn = pppoe_pernet(dev_net(dev));
@@ -576,7 +580,11 @@ static int pppoe_release(struct socket *sock)
 
 	po = pppox_sk(sk);
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (sk->sk_state & (PPPOX_CONNECTED | PPPOX_BOUND)) {
+#else
+	if (sk->sk_state & (PPPOX_CONNECTED | PPPOX_BOUND | PPPOX_ZOMBIE)) {
+#endif
 		dev_put(po->pppoe_dev);
 		po->pppoe_dev = NULL;
 	}

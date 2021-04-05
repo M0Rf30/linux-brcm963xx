@@ -16,6 +16,11 @@
 
 #include "internals.h"
 
+#if defined(CONFIG_BCM_KF_BUZZZ) && defined(CONFIG_BUZZZ_KEVT)
+#include <asm/buzzz.h>
+#endif  /*  CONFIG_BUZZZ */
+
+
 static int irqfixup __read_mostly;
 
 #define POLL_SPURIOUS_IRQ_INTERVAL (HZ/10)
@@ -65,6 +70,10 @@ static int try_one_irq(int irq, struct irq_desc *desc, bool force)
 	irqreturn_t ret = IRQ_NONE;
 	struct irqaction *action;
 
+#if defined(CONFIG_BCM_KF_BUZZZ) && defined(CONFIG_BUZZZ_KEVT) && (BUZZZ_KEVT_LVL >= 1)
+	buzzz_kevt_log1(BUZZZ_KEVT_ID_IRQ_MISROUTED, irq);
+#endif  /*  CONFIG_BUZZZ_KEVT && BUZZZ_KEVT_LVL >= 1 */
+
 	raw_spin_lock(&desc->lock);
 
 	/* PER_CPU and nested thread interrupts are never polled */
@@ -84,9 +93,13 @@ static int try_one_irq(int irq, struct irq_desc *desc, bool force)
 	 */
 	action = desc->action;
 	if (!action || !(action->flags & IRQF_SHARED) ||
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	    (action->flags & __IRQF_TIMER) ||
 	    (action->handler(irq, action->dev_id) == IRQ_HANDLED) ||
 	    !action->next)
+#else
+	    (action->flags & __IRQF_TIMER))
+#endif
 		goto out;
 
 	/* Already running on another processor */
@@ -104,6 +117,9 @@ static int try_one_irq(int irq, struct irq_desc *desc, bool force)
 	do {
 		if (handle_irq_event(desc) == IRQ_HANDLED)
 			ret = IRQ_HANDLED;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+		/* Make sure that there is still a valid action */
+#endif
 		action = desc->action;
 	} while ((desc->istate & IRQS_PENDING) && action);
 	desc->istate &= ~IRQS_POLL_INPROGRESS;
@@ -341,6 +357,11 @@ MODULE_PARM_DESC(noirqdebug, "Disable irq lockup detection when true");
 
 static int __init irqfixup_setup(char *str)
 {
+#ifdef CONFIG_PREEMPT_RT_BASE
+	printk(KERN_WARNING "irqfixup boot option not supported "
+		"w/ CONFIG_PREEMPT_RT\n");
+	return 1;
+#endif
 	irqfixup = 1;
 	printk(KERN_WARNING "Misrouted IRQ fixup support enabled.\n");
 	printk(KERN_WARNING "This may impact system performance.\n");
@@ -353,6 +374,11 @@ module_param(irqfixup, int, 0644);
 
 static int __init irqpoll_setup(char *str)
 {
+#ifdef CONFIG_PREEMPT_RT_BASE
+	printk(KERN_WARNING "irqpoll boot option not supported "
+		"w/ CONFIG_PREEMPT_RT\n");
+	return 1;
+#endif
 	irqfixup = 2;
 	printk(KERN_WARNING "Misrouted IRQ fixup and polling support "
 				"enabled\n");

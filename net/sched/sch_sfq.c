@@ -330,6 +330,9 @@ drop:
 		len = qdisc_pkt_len(skb);
 		slot->backlog -= len;
 		sfq_dec(q, x);
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		sch->bstats.dropbytes += skb->len;
+#endif
 		kfree_skb(skb);
 		sch->q.qlen--;
 		sch->qstats.drops++;
@@ -381,6 +384,9 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	if (hash == 0) {
 		if (ret & __NET_XMIT_BYPASS)
 			sch->qstats.drops++;
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		sch->bstats.dropbytes += skb->len;
+#endif
 		kfree_skb(skb);
 		return ret;
 	}
@@ -447,6 +453,9 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 
 	if (slot->qlen >= q->maxdepth) {
 congestion_drop:
+#if 1 /* ZyXEL QoS, porting from MSTC */
+                sch->bstats.dropbytes += skb->len;
+#endif
 		if (!sfq_headdrop(q))
 			return qdisc_drop(skb, sch);
 

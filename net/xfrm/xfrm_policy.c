@@ -1761,7 +1761,11 @@ static struct dst_entry *make_blackhole(struct net *net, u16 family,
 
 	if (!afinfo) {
 		dst_release(dst_orig);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		ret = ERR_PTR(-EINVAL);
+#else
+		return ERR_PTR(-EINVAL);
+#endif
 	} else {
 		ret = afinfo->blackhole_route(net, dst_orig);
 	}
@@ -2291,11 +2295,18 @@ static void __xfrm_garbage_collect(struct net *net)
 	}
 }
 
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE))
+void xfrm_garbage_collect(struct net *net)
+#else
 static void xfrm_garbage_collect(struct net *net)
+#endif
 {
 	flow_cache_flush();
 	__xfrm_garbage_collect(net);
 }
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE))
+EXPORT_SYMBOL(xfrm_garbage_collect);
+#endif
 
 static void xfrm_garbage_collect_deferred(struct net *net)
 {

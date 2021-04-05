@@ -32,6 +32,19 @@
 #include <linux/mm.h>
 #include <linux/nsproxy.h>
 #include <linux/rculist_nulls.h>
+#if defined(CONFIG_BCM_KF_BLOG)
+#include <linux/blog.h>
+#include <linux/iqos.h>
+#endif
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+#include <linux/iqos.h>
+#endif
+
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+#include <linux/dpistats.h>
+#include <linux/dpi_ctk.h>
+#endif
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_l3proto.h>
@@ -47,6 +60,28 @@
 #include <net/netfilter/nf_conntrack_timeout.h>
 #include <net/netfilter/nf_nat.h>
 #include <net/netfilter/nf_nat_core.h>
+
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+#include <net/bl_ops.h>
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
+/* Altibox has a CA system that is used to handle entitlements for STB.
+   The STB is always talking to STB on destination port 1600 and will
+   start a new connection to CA server every 600 seconds. The CA server
+   is also used to notify STB of other events (like request to reboot etc) */
+#define PROC_STB_PORT	"zy_nf_ct_udp_STB_port"
+#define PROC_STB_TIMEOUT	"zy_nf_ct_udp_STB_timeout"
+extern uint32_t nf_ct_udp_STB_timeout __read_mostly;
+extern uint32_t nf_ct_udp_STB_port __read_mostly;
+
+static int proc_STB_timeout_read(char *buffer,char **buffer_location,off_t offset, int buffer_length, int *eof, void *data);
+static int proc_STB_timeout_write(struct file *file, const char *buf, unsigned long count, void *data);
+static int proc_STB_port_read(char *buffer,char **buffer_location,off_t offset, int buffer_length, int *eof, void *data);
+static int proc_STB_port_write(struct file *file, const char *buf, unsigned long count, void *data);
+int Zy_UDP_init_proc(void);
+void Zy_UDP_deinit_proc(void);
 
 #define NF_CONNTRACK_VERSION	"0.5.0"
 
@@ -69,6 +104,86 @@ EXPORT_PER_CPU_SYMBOL(nf_conntrack_untracked);
 
 unsigned int nf_conntrack_hash_rnd __read_mostly;
 EXPORT_SYMBOL_GPL(nf_conntrack_hash_rnd);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+//unsigned  int nf_session_ctl_max = 2048  __read_mostly;;	/*setup with /proc/sys/net/netfilter/ */
+unsigned  int nf_session_ctl_max __read_mostly;
+EXPORT_SYMBOL_GPL(nf_session_ctl_max);
+
+/*computes the hash_index for "session_control_table[hash_index] by ila"
+    Only for session contral used. */
+static inline u_int32_t hash_sesscnt(const union nf_inet_addr *u3)
+{
+	return ( (u3->ip) & (nf_conntrack_htable_size-1));
+}
+
+static void
+clean_session_ctl_lists(struct nf_conn *ct)
+{
+	/*=================================*/
+	/* === Clean the Session_Control_Table by ila. === */
+	/*=================================*/
+
+	 struct net *net = nf_ct_net(ct);
+	int do_session_clean=1;
+
+	/*clean for lan2wan */
+
+	struct nf_sess_ref_count *hc_ip;
+	unsigned int hashc_ip = hash_sesscnt(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3);
+	struct hlist_nulls_node *n;
+
+	pr_debug("clean_session_ctl_lists(%p)\n", ct);
+	rcu_read_lock_bh();
+
+	hlist_nulls_for_each_entry_rcu(hc_ip, n, &net->ct.session_control_table[hashc_ip], hnnode)
+    {
+		if(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3.ip == hc_ip->u3.ip){
+			hc_ip->sess_Cnt--;
+			do_session_clean=0;
+			if(hc_ip->sess_Cnt <= 0){
+				hlist_nulls_del_rcu(&hc_ip->hnnode);
+				kfree(&hc_ip->hnnode);
+			}
+			break;
+		}
+	}
+	rcu_read_unlock_bh();
+
+	/*Clean for wan2lan, this kind will happen in Restricted cone NAT which entry created by us.*/
+
+	if (do_session_clean == 1){
+		struct nf_sess_ref_count *hc_ip_wan;
+		unsigned int hash_ip_wan = hash_sesscnt(&ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3);
+
+		rcu_read_lock_bh();
+
+        hlist_nulls_for_each_entry_rcu(hc_ip_wan, n, &net->ct.session_control_table[hash_ip_wan], hnnode) {
+			if(ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3.ip == hc_ip_wan->u3.ip){
+				hc_ip_wan->sess_Cnt--;
+				do_session_clean=0;
+				if(hc_ip_wan->sess_Cnt <= 0){
+ 					hlist_nulls_del_rcu(&hc_ip_wan->hnnode);
+					kfree(&hc_ip_wan->hnnode);
+				}
+				break;
+			}
+		}
+        rcu_read_unlock_bh();
+    }
+}
+#endif
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+/* bugfix for lost connection */
+LIST_HEAD(lo_safe_list);
+LIST_HEAD(hi_safe_list);
+#endif
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+int blog_dpi_ctk_update(uint32_t appid);
+#endif
+#endif
 
 static u32 hash_conntrack_raw(const struct nf_conntrack_tuple *tuple, u16 zone)
 {
@@ -180,12 +295,69 @@ static void
 clean_from_lists(struct nf_conn *ct)
 {
 	pr_debug("clean_from_lists(%p)\n", ct);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	clean_session_ctl_lists(ct);
+#endif
 	hlist_nulls_del_rcu(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode);
 	hlist_nulls_del_rcu(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode);
 
 	/* Destroy all pending expectations */
 	nf_ct_remove_expectations(ct);
 }
+
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+static inline void evict_ctk_update( struct nf_conn *ct )
+{
+#if 0
+	if (ct->stats_idx == DPISTATS_IX_INVALID) {
+		if (ct->dpi.app_id == 0) goto stats_done;
+
+		ct->stats_idx = dpistats_lookup(&ct->dpi);
+	}
+#endif
+	if (ct->dpi.app_id == 0)
+		return;
+
+	if (ct->stats_idx != DPISTATS_IX_INVALID) {
+		DpiStatsEntry_t stats;
+
+		if (!IS_CTK_INIT_FROM_WAN(ct)) {
+			if (conntrack_evict_stats(ct, IP_CT_DIR_ORIGINAL,
+						  &stats.upstream))
+				printk("1conntrack_evict_stats(upstream) fails");
+
+			if ((test_bit(IPS_SEEN_REPLY_BIT, &ct->status))) {
+				if (conntrack_evict_stats(ct, IP_CT_DIR_REPLY,
+							  &stats.dnstream))
+					printk("1conntrack_evict_stats(dnstream) fails");
+			} else
+				memset(&stats.dnstream, 0 , sizeof(CtkStats_t));
+		} else {	/* origin direction is dnstream */
+			if (conntrack_evict_stats(ct, IP_CT_DIR_ORIGINAL,
+						  &stats.dnstream))
+				printk("2conntrack_evict_stats(dnstream) fails");
+
+			if ((test_bit(IPS_SEEN_REPLY_BIT, &ct->status))) {
+				if (conntrack_evict_stats(ct, IP_CT_DIR_REPLY,
+							  &stats.upstream))
+					printk("2conntrack_evict_stats(upstream) fails");
+			} else
+				memset(&stats.upstream, 0 , sizeof(CtkStats_t));
+		}
+
+		dpistats_update(ct->stats_idx, &stats);
+	}
+
+	return;
+}
+#endif
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+static void death_by_timeout(unsigned long ul_conntrack);
+#endif
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+static void blog_death_by_timeout(unsigned long ul_conntrack);
+#endif
 
 static void
 destroy_conntrack(struct nf_conntrack *nfct)
@@ -194,7 +366,41 @@ destroy_conntrack(struct nf_conntrack *nfct)
 	struct net *net = nf_ct_net(ct);
 	struct nf_conntrack_l4proto *l4proto;
 
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	blog_lock();
+	pr_debug("%s(%p) blog keys[0x%08x,0x%08x]\n", __func__,
+		ct, ct->blog_key[IP_CT_DIR_ORIGINAL],
+		ct->blog_key[IP_CT_DIR_REPLY]);
+
+
+	/* Conntrack going away, notify blog client */
+	if ((ct->blog_key[IP_CT_DIR_ORIGINAL] != BLOG_KEY_NONE) ||
+			(ct->blog_key[IP_CT_DIR_REPLY] != BLOG_KEY_NONE)) {
+		/*
+		 *  Blog client may perform the following blog requests:
+		 *	- FLOWTRACK_KEY_SET BLOG_PARAM1_DIR_ORIG 0
+		 *	- FLOWTRACK_KEY_SET BLOG_PARAM1_DIR_REPLY 0
+		 *	- FLOWTRACK_EXCLUDE
+		 */
+		blog_notify(DESTROY_FLOWTRACK, (void*)ct,
+					(uint32_t)ct->blog_key[IP_CT_DIR_ORIGINAL],
+					(uint32_t)ct->blog_key[IP_CT_DIR_REPLY]);
+
+		/* Safe: In case blog client does not set key to 0 explicilty */
+		ct->blog_key[IP_CT_DIR_ORIGINAL] = BLOG_KEY_NONE;
+		ct->blog_key[IP_CT_DIR_REPLY]    = BLOG_KEY_NONE;
+		ct->prev_idle = 0;
+	}
+	clear_bit(IPS_BLOG_BIT, &ct->status);	/* Disable further blogging */
+	blog_unlock();
+#else
 	pr_debug("destroy_conntrack(%p)\n", ct);
+#endif
+
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+	evict_ctk_update(ct);
+#endif
 	NF_CT_ASSERT(atomic_read(&nfct->use) == 0);
 	NF_CT_ASSERT(!timer_pending(&ct->timeout));
 
@@ -215,6 +421,20 @@ destroy_conntrack(struct nf_conntrack *nfct)
 	 * too. */
 	nf_ct_remove_expectations(ct);
 
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	BL_OPS(net_netfilter_nf_conntrack_core_destroy_conntrack(ct));
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
+#if defined(CONFIG_BCM_KF_XT_MATCH_LAYER7) && \
+	(defined(CONFIG_NETFILTER_XT_MATCH_LAYER7) || defined(CONFIG_NETFILTER_XT_MATCH_LAYER7_MODULE))
+	if (ct->layer7.app_proto)
+		kfree(ct->layer7.app_proto);
+	if (ct->layer7.app_data)
+		kfree(ct->layer7.app_data);
+#endif
+
 	/* We overload first tuple to link into unconfirmed list. */
 	if (!nf_ct_is_confirmed(ct)) {
 		BUG_ON(hlist_nulls_unhashed(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode));
@@ -225,7 +445,63 @@ destroy_conntrack(struct nf_conntrack *nfct)
 	spin_unlock_bh(&nf_conntrack_lock);
 
 	if (ct->master)
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	{
+		struct nf_conn_help * help;
+		struct nf_conntrack_helper *helper;
+
+		help = test_bit(IPS_DYING_BIT, &ct->master->status)? 
+			NULL: nfct_help(ct->master);
+
+		if (help) {
+			rcu_read_lock();
+			helper = rcu_dereference(help->helper);
+
+			if (helper && helper->name) {
+
+				pr_debug("helper->name:%s\n", helper->name);
+
+				if ( (!strncmp(helper->name, "sip", 3)
+				      && (nfct_help(ct) == NULL))
+				     || !strncmp(helper->name, "H.245", 5)
+				     || !strncmp(helper->name, "Q.931", 5)
+				     || !strncmp(helper->name, "RAS", 3)
+				     || !strncmp(helper->name, "rtsp", 4)) {
+
+					iqos_rem_L4port(IQOS_IPPROTO_UDP,
+							ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u.udp.port,
+							IQOS_ENT_DYN);
+					iqos_rem_L4port(IQOS_IPPROTO_UDP,
+							ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u.udp.port, 
+							IQOS_ENT_DYN);
+					pr_debug("remove iqos port :%u\n",
+						 ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u.udp.port);
+					pr_debug("remove iqos port :%u\n",
+						 ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u.udp.port);
+				}
+			}
+			rcu_read_unlock();
+		}
+		list_del(&ct->derived_list);
+#endif
 		nf_ct_put(ct->master);
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	}
+#endif
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	/* Disconnect all child connections that have infinit timeout */
+	if (!list_empty(&ct->derived_connections)) {
+		struct nf_conn *child, *tmp;
+
+		list_for_each_entry_safe(child, tmp, &ct->derived_connections,
+			derived_list) {
+			if (child->derived_timeout == 0xFFFFFFFF &&
+			    del_timer(&child->timeout))
+				death_by_timeout((unsigned long)child);
+		}
+	}
+#endif
 
 	pr_debug("destroy_conntrack: returning ct=%p to slab\n", ct);
 	nf_conntrack_free(ct);
@@ -249,12 +525,25 @@ static void death_by_event(unsigned long ul_conntrack)
 {
 	struct nf_conn *ct = (void *)ul_conntrack;
 	struct net *net = nf_ct_net(ct);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	struct nf_conntrack_ecache *ecache = nf_ct_ecache_find(ct);
+
+	BUG_ON(ecache == NULL);
+#endif
 
 	if (nf_conntrack_event(IPCT_DESTROY, ct) < 0) {
 		/* bad luck, let's retry again */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		ct->timeout.expires = jiffies +
+#else
+		ecache->timeout.expires = jiffies +
+#endif
 			(random32() % net->ct.sysctl_events_retry_timeout);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		add_timer(&ct->timeout);
+#else
+		add_timer(&ecache->timeout);
+#endif
 		return;
 	}
 	/* we've got the event delivered, now it's dying */
@@ -268,6 +557,11 @@ static void death_by_event(unsigned long ul_conntrack)
 void nf_ct_insert_dying_list(struct nf_conn *ct)
 {
 	struct net *net = nf_ct_net(ct);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	struct nf_conntrack_ecache *ecache = nf_ct_ecache_find(ct);
+
+	BUG_ON(ecache == NULL);
+#endif
 
 	/* add this conntrack to the dying list */
 	spin_lock_bh(&nf_conntrack_lock);
@@ -275,10 +569,19 @@ void nf_ct_insert_dying_list(struct nf_conn *ct)
 			     &net->ct.dying);
 	spin_unlock_bh(&nf_conntrack_lock);
 	/* set a new timer to retry event delivery */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	setup_timer(&ct->timeout, death_by_event, (unsigned long)ct);
 	ct->timeout.expires = jiffies +
+#else
+	setup_timer(&ecache->timeout, death_by_event, (unsigned long)ct);
+	ecache->timeout.expires = jiffies +
+#endif
 		(random32() % net->ct.sysctl_events_retry_timeout);
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	add_timer(&ct->timeout);
+#else
+	add_timer(&ecache->timeout);
+#endif
 }
 EXPORT_SYMBOL_GPL(nf_ct_insert_dying_list);
 
@@ -286,6 +589,13 @@ static void death_by_timeout(unsigned long ul_conntrack)
 {
 	struct nf_conn *ct = (void *)ul_conntrack;
 	struct nf_conn_tstamp *tstamp;
+
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	BL_OPS_CR(net_netfilter_nf_conntrack_core_death_by_timeout(ct));
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
 
 	tstamp = nf_conn_tstamp_find(ct);
 	if (tstamp && tstamp->stop == 0)
@@ -302,6 +612,104 @@ static void death_by_timeout(unsigned long ul_conntrack)
 	nf_ct_delete_from_lists(ct);
 	nf_ct_put(ct);
 }
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+void __nf_ct_time(struct nf_conn *ct, BlogCtTime_t *ct_time_p)
+{
+	/* Cases:
+	* a) conn has been active, prev_idle = 0, idle_jiffies = 0
+	* b) conn becomes idle,  prev_idle = 0, idle_jiffies != 0
+	* c) conn becomes idle in prev timeout and then becomes active again.
+	*    prev_idle = 0, and idle_jiffies != 0.
+	* d) conn was idle in prev timeout and is still idle.
+	*    prev_idle != 0, and idle_jiffies != 0.
+	*
+	*    In the first three cases (a) to (c), timer should be restarted
+	*    after adjustment for idle_jiffies.
+	*
+	*    In the last case (d), on expiry it is time to destroy the conn.
+	*
+	* e) the udp conntrack timeout is set to less than flow cache interval(120 sec)
+	*/
+  
+	if ( nf_ct_protonum(ct) == IPPROTO_UDP && ct->prev_idle)   /* handle case (e) */
+	{
+	    if( ct_time_p->idle_jiffies < ct_time_p->extra_jiffies)
+	    {
+	        unsigned long newtime_1;
+	        if (timer_pending(&ct->timeout))
+			    del_timer(&ct->timeout);
+
+		    ct->prev_timeout.expires = ct->timeout.expires;
+		    newtime_1= ct->timeout.expires + (ct_time_p->extra_jiffies - ct_time_p->idle_jiffies);
+		    ct->timeout.expires = newtime_1;
+		    add_timer(&ct->timeout);
+	        ct->prev_idle = ct_time_p->idle_jiffies;
+
+		}else {
+		    if (timer_pending(&ct->timeout))
+			    del_timer(&ct->timeout);
+
+		    death_by_timeout((unsigned long) ct);
+	    }
+	} else if ((!ct->prev_idle) || (!ct_time_p->idle_jiffies)) {
+		unsigned long newtime;
+
+		ct->prev_timeout.expires = ct->timeout.expires;
+		newtime= jiffies + (ct_time_p->extra_jiffies - ct_time_p->idle_jiffies);
+		mod_timer(&ct->timeout, newtime);
+		ct->prev_idle = ct_time_p->idle_jiffies;
+	} else {
+		del_timer(&ct->timeout);
+
+		death_by_timeout((unsigned long) ct);
+	}
+}
+
+static void blog_death_by_timeout(unsigned long ul_conntrack)
+{
+	struct nf_conn *ct = (void *)ul_conntrack;
+	BlogCtTime_t ct_time;
+	uint32_t ct_blog_key = 0;
+
+	memset(&ct_time, 0, sizeof(ct_time));
+	blog_lock();
+	if (ct->blog_key[BLOG_PARAM1_DIR_ORIG] != BLOG_KEY_NONE ||
+	    ct->blog_key[BLOG_PARAM1_DIR_REPLY] != BLOG_KEY_NONE) {
+		blog_query(QUERY_FLOWTRACK, (void*)ct,
+			ct->blog_key[BLOG_PARAM1_DIR_ORIG],
+			ct->blog_key[BLOG_PARAM1_DIR_REPLY], (uint32_t) &ct_time);
+
+		ct_blog_key = 1;
+	}
+	blog_unlock();
+
+	if (ct_time.flags.valid && ct_blog_key)
+		__nf_ct_time(ct, &ct_time);
+	else {
+		del_timer(&ct->timeout);
+
+		death_by_timeout((unsigned long) ct);
+	}
+}
+
+void __nf_ct_time_update(struct nf_conn *ct, BlogCtTime_t *ct_time_p)
+{
+	unsigned long newtime;
+
+	if (!timer_pending(&ct->timeout))
+		return;
+
+	if (ct->blog_key[BLOG_PARAM1_DIR_ORIG] != BLOG_KEY_NONE ||
+	    ct->blog_key[BLOG_PARAM1_DIR_REPLY] != BLOG_KEY_NONE) {
+		ct->prev_idle = 0;
+
+		newtime = jiffies + (ct_time_p->extra_jiffies - ct_time_p->idle_jiffies);
+		ct->prev_timeout.expires = jiffies;
+		mod_timer_pending(&ct->timeout, newtime);
+	}
+}
+#endif
 
 /*
  * Warning :
@@ -524,6 +932,13 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	   weird delay cases. */
 	ct->timeout.expires += jiffies;
 	add_timer(&ct->timeout);
+
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	BL_OPS(net_netfilter_nf_conntrack_core_nf_conntrack_confirm(ct, skb));
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
 	atomic_inc(&ct->ct_general.use);
 	ct->status |= IPS_CONFIRMED;
 
@@ -542,6 +957,31 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	 */
 	__nf_conntrack_hash_insert(ct, hash, repl_hash);
 	NF_CT_STAT_INC(net, insert);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+    {
+		struct nf_sess_ref_count *h_ip, *ila;
+		/* look for the match "ip address" in session_control_table which store ila */
+		unsigned int hash_ip = hash_sesscnt(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3);
+		hlist_nulls_for_each_entry_rcu(h_ip, n, &net->ct.session_control_table[hash_ip], hnnode) {
+			if(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3.ip == h_ip->u3.ip){
+				h_ip->sess_Cnt++;
+				goto xxx;
+			}
+		}
+
+		ila = kzalloc(sizeof(struct nf_sess_ref_count),GFP_KERNEL);
+		if(!ila){
+			printk(KERN_ERR "Unable to create nf_sess_ref_count \n");
+			spin_unlock_bh(&nf_conntrack_lock);
+			return -ENOMEM;
+		}
+		memcpy(&ila->u3, &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3,sizeof(ila->u3));
+		ila->sess_Cnt = 1;
+		hlist_nulls_add_head_rcu(&ila->hnnode, &net->ct.session_control_table[hash_ip]);
+    }
+	xxx:
+#endif
+
 	spin_unlock_bh(&nf_conntrack_lock);
 
 	help = nfct_help(ct);
@@ -593,6 +1033,66 @@ nf_conntrack_tuple_taken(const struct nf_conntrack_tuple *tuple,
 }
 EXPORT_SYMBOL_GPL(nf_conntrack_tuple_taken);
 
+#if defined(CONFIG_BCM_KF_NETFILTER)
+static int regardless_drop(struct net *net, struct sk_buff *skb)
+{
+	struct nf_conn *ct = NULL;
+	struct list_head *tmp;
+	int dropped = 0;
+
+	/* Choose the first one (also the oldest one). LRU */
+	spin_lock_bh(&nf_conntrack_lock);
+	if (!list_empty(&lo_safe_list)) {
+		list_for_each(tmp, &lo_safe_list) {
+			ct = container_of(tmp, struct nf_conn, safe_list);
+
+			if (ct != NULL) {
+				if (likely(!nf_ct_is_dying(ct) &&
+							atomic_inc_not_zero(&ct->ct_general.use)))
+					break;
+				else
+					ct = NULL;
+			}
+		}
+	}
+
+	if (!ct && (blog_iq(skb) == IQOS_PRIO_HIGH)) {
+		list_for_each(tmp, &hi_safe_list) {
+			ct = container_of(tmp, struct nf_conn, safe_list);
+
+			if (ct != NULL) {
+				if (likely(!nf_ct_is_dying(ct) &&
+							atomic_inc_not_zero(&ct->ct_general.use)))
+					break;
+				else
+					ct = NULL;
+			}
+		}
+	}
+	spin_unlock_bh(&nf_conntrack_lock);
+
+	if (!ct)
+		return dropped;
+
+	if (del_timer(&ct->timeout)) {
+		death_by_timeout((unsigned long)ct);
+		if (test_bit(IPS_DYING_BIT, &ct->status)) {
+			dropped = 1;
+			NF_CT_STAT_INC_ATOMIC(net, early_drop);
+		}
+	}
+	/* else {
+	 * this happens when the ct at safelist head is removed from the timer list 
+	 * but not yet freed due to ct->ct_general.use > 1. This ct will be freed when its
+	 * ref count is dropped to zero. At this point we dont create new connections 
+	 * until some old connection are freed.
+	 * }
+	 */
+
+	nf_ct_put(ct);
+	return dropped;
+}
+#else
 #define NF_CT_EVICTION_RANGE	8
 
 /* There's a small race here where we may free a just-assured
@@ -646,6 +1146,7 @@ static noinline int early_drop(struct net *net, unsigned int hash)
 	nf_ct_put(ct);
 	return dropped;
 }
+#endif
 
 void init_nf_conntrack_hash_rnd(void)
 {
@@ -662,11 +1163,27 @@ void init_nf_conntrack_hash_rnd(void)
 	cmpxchg(&nf_conntrack_hash_rnd, 0, rand);
 }
 
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+static inline int
+nf_conntrack_ipv6_is_multicast(const __be32 ip6[4])
+{
+	return ((ip6[0] & htonl(0xFF000000)) == htonl(0xFF000000));
+}
+
+static struct nf_conn *
+__nf_conntrack_alloc(struct net *net, u16 zone,
+		     struct sk_buff *skb,
+		     const struct nf_conntrack_tuple *orig,
+		     const struct nf_conntrack_tuple *repl,
+		     gfp_t gfp, u32 hash)
+#else
 static struct nf_conn *
 __nf_conntrack_alloc(struct net *net, u16 zone,
 		     const struct nf_conntrack_tuple *orig,
 		     const struct nf_conntrack_tuple *repl,
 		     gfp_t gfp, u32 hash)
+#endif
 {
 	struct nf_conn *ct;
 
@@ -681,6 +1198,17 @@ __nf_conntrack_alloc(struct net *net, u16 zone,
 
 	if (nf_conntrack_max &&
 	    unlikely(atomic_read(&net->ct.count) > nf_conntrack_max)) {
+#if defined(CONFIG_BCM_KF_NETFILTER)
+		/* Sorry, we have to kick LRU out regardlessly. */
+		if (!regardless_drop(net, skb)) {
+				atomic_dec(&net->ct.count);
+			if (net_ratelimit())
+			printk(KERN_WARNING
+				"nf_conntrack: table full, dropping"
+				" packet.\n");
+			return ERR_PTR(-ENOMEM);
+		}
+#else
 		if (!early_drop(net, hash_bucket(hash, net))) {
 			atomic_dec(&net->ct.count);
 			if (net_ratelimit())
@@ -689,7 +1217,80 @@ __nf_conntrack_alloc(struct net *net, u16 zone,
 				       " packet.\n");
 			return ERR_PTR(-ENOMEM);
 		}
+#endif
 	}
+
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL
+	/*	== ZYXEL, Session_Control max num judgement function. /proc/net/nf_session_ctl ==*/
+	/*		0					session max number						*/
+	/*		|--------|--|--------------................|				*/
+	/*			0.8*session_max number         conntrack max number		*/
+	if(nf_session_ctl_max != nf_conntrack_max)
+	{
+
+		struct nf_sess_ref_count *h_max;
+		struct nf_conntrack_tuple_hash *h_full_cone;		/* look for tuple match by "iga igp" for full_cone NAT*/
+		union nf_inet_addr check_ip;
+		unsigned int hash_max = hash_sesscnt(&orig->src.u3);
+		int cone_session_control = 0,known_port;
+		struct hlist_nulls_node *n;
+
+
+
+		/* The check_ip is change to LAN IP and Reserved for well known services(known_port<1024)*/
+		if(cone_session_control == 0){	//For the LAN init packet, Normal packets
+			check_ip.ip = orig->src.u3.ip;
+			known_port = orig->dst.u.all;
+		}else{				//For the WAN init packet, Cone NAT used
+			check_ip.ip = h_full_cone->tuple.src.u3.ip;
+			known_port = orig->src.u.all;
+		}
+
+		rcu_read_lock();
+		hlist_nulls_for_each_entry_rcu(h_max, n, &net->ct.session_control_table[hash_max], hnnode){
+			if(check_ip.ip == h_max->u3.ip){
+				/* MAX Session Per Host */
+				if(h_max->sess_Cnt >= nf_session_ctl_max){
+#if defined(CONFIG_BCM_KF_NETFILTER)
+					if (!regardless_drop(net, skb)){
+#else
+					unsigned int hash1 = hash_conntrack(net, zone, orig);
+					if (!early_drop(net, hash1)){
+#endif
+					    atomic_dec(&net->ct.count);
+					    if (net_ratelimit()){
+							printk(KERN_WARNING "NAT WARNING: %u.%u.%u.%u exceeds the max. number of session per host!\n"
+								,NIPQUAD(orig->src.u3.ip));	/* Modified nat log for system log*/
+					    }
+					    rcu_read_unlock();
+					    return ERR_PTR(-ENOMEM);
+					}
+				}
+
+				/* Reserved for well known services(known_port<1024) */
+				if(h_max->sess_Cnt >= (nf_session_ctl_max*8/10) &&  known_port > 1024){
+#if defined(CONFIG_BCM_KF_NETFILTER)
+					if (!regardless_drop(net, skb)){
+#else
+					unsigned int hash2 = hash_conntrack(net, zone, orig);
+					if (!early_drop(net, hash2)){
+#endif
+						atomic_dec(&net->ct.count);
+						if (net_ratelimit()){
+							printk(KERN_WARNING
+								"unknown services(port>1024) session full [max=%d], dropping"
+								" packet.\n",(nf_session_ctl_max*8/10));
+						}
+						rcu_read_unlock();
+						return ERR_PTR(-ENOMEM);
+					}
+				}
+			}
+		}
+		rcu_read_unlock();
+	}
+	/*	== ZYXEL, Session_Control max num judgement function. /proc/net/nf_session_ctl ==*/
+#endif
 
 	/*
 	 * Do not use kmem_cache_zalloc(), as this cache uses
@@ -700,6 +1301,14 @@ __nf_conntrack_alloc(struct net *net, u16 zone,
 		atomic_dec(&net->ct.count);
 		return ERR_PTR(-ENOMEM);
 	}
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	INIT_LIST_HEAD(&ct->safe_list);
+	INIT_LIST_HEAD(&ct->derived_connections);
+	INIT_LIST_HEAD(&ct->derived_list);
+	ct->derived_timeout = 0;
+#endif
+
 	/*
 	 * Let ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode.next
 	 * and ct->tuplehash[IP_CT_DIR_REPLY].hnnode.next unchanged.
@@ -707,14 +1316,82 @@ __nf_conntrack_alloc(struct net *net, u16 zone,
 	memset(&ct->tuplehash[IP_CT_DIR_MAX], 0,
 	       offsetof(struct nf_conn, proto) -
 	       offsetof(struct nf_conn, tuplehash[IP_CT_DIR_MAX]));
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	/* Broadcom changed the position of these two fields.  They used to be
+	   in the area being memset to 0 */
+	ct->master = 0;
+	ct->status = 0;
+#endif
+
+#if defined(CONFIG_BCM_KF_NETFILTER) && (defined(CONFIG_NF_DYNDSCP) || defined(CONFIG_NF_DYNDSCP_MODULE))
+	ct->dyndscp.status = 0;
+	ct->dyndscp.dscp[0] = 0;
+	ct->dyndscp.dscp[1] = 0;
+#endif
+
 	spin_lock_init(&ct->lock);
 	ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple = *orig;
 	ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode.pprev = NULL;
 	ct->tuplehash[IP_CT_DIR_REPLY].tuple = *repl;
 	/* save hash for reusing when confirming */
 	*(unsigned long *)(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode.pprev) = hash;
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	pr_debug("nf_conntrack_alloc: ct<%p> BLOGible\n", ct );
+	set_bit(IPS_BLOG_BIT, &ct->status);  /* Enable conntrack blogging */
+
+	/* new conntrack: reset blog keys */
+	ct->blog_key[IP_CT_DIR_ORIGINAL] = BLOG_KEY_NONE;
+	ct->blog_key[IP_CT_DIR_REPLY]    = BLOG_KEY_NONE;
+	ct->prev_idle = 0;
+	if (skb == NULL || skb->blog_p == NULL ) {
+		switch (nf_ct_l3num(ct)) {
+			case AF_INET:
+				ct->iq_prio = ipv4_is_multicast(orig->dst.u3.ip) ? IQOS_PRIO_HIGH : IQOS_PRIO_LOW;
+				break;
+			case AF_INET6:
+				ct->iq_prio = nf_conntrack_ipv6_is_multicast(orig->dst.u3.ip6) ? IQOS_PRIO_HIGH : IQOS_PRIO_LOW;
+				break;
+			default:
+				ct->iq_prio = IQOS_PRIO_LOW;
+		}
+	} else {
+		ct->iq_prio = blog_iq(skb);
+	}
+	ct->prev_timeout.expires = jiffies;
+
+	/* Don't set timer yet: wait for confirmation */
+	setup_timer(&ct->timeout, blog_death_by_timeout, (unsigned long)ct);
+#else
 	/* Don't set timer yet: wait for confirmation */
 	setup_timer(&ct->timeout, death_by_timeout, (unsigned long)ct);
+#endif
+
+#if defined(CONFIG_BCM_KF_XT_MATCH_LAYER7) && \
+	(defined(CONFIG_NETFILTER_XT_MATCH_LAYER7) || defined(CONFIG_NETFILTER_XT_MATCH_LAYER7_MODULE))
+	ct->layer7.app_proto = NULL;
+	ct->layer7.app_data = NULL;
+	ct->layer7.app_data_len = 0;
+#endif
+
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+	ct->dpi.app_id = 0;
+	ct->dpi.dev_key = 0;
+	ct->dpi.flags = 0;
+	ct->dpi.url_id = 0;
+	ct->stats_idx = DPISTATS_IX_INVALID;
+
+	if (skb && (skb->dev) && (skb->dev->priv_flags & IFF_WANDEV))
+		ct->dpi.flags |= CTK_INIT_FROM_WAN;
+#endif
+
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+#if defined(CONFIG_BCM_RUNNER_RG) || defined(CONFIG_BCM_RUNNER_RG_MODULE)
+	ct->bl_ctx = NULL;
+	BL_OPS(net_netfilter_nf_conntrack_core_nf_conntrack_alloc(ct));
+#endif /* CONFIG_BCM_RUNNER_RG || CONFIG_BCM_RUNNER_RG_MODULE */
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
 	write_pnet(&ct->ct_net, net);
 #ifdef CONFIG_NF_CONNTRACK_ZONES
 	if (zone) {
@@ -741,6 +1418,16 @@ out_free:
 #endif
 }
 
+#if defined(CONFIG_BCM_KF_NETFILTER)
+struct nf_conn *nf_conntrack_alloc(struct net *net, u16 zone,
+				   struct sk_buff *skb,
+				   const struct nf_conntrack_tuple *orig,
+				   const struct nf_conntrack_tuple *repl,
+				   gfp_t gfp)
+{
+	return __nf_conntrack_alloc(net, zone, skb, orig, repl, gfp, 0);
+}
+#else
 struct nf_conn *nf_conntrack_alloc(struct net *net, u16 zone,
 				   const struct nf_conntrack_tuple *orig,
 				   const struct nf_conntrack_tuple *repl,
@@ -748,11 +1435,25 @@ struct nf_conn *nf_conntrack_alloc(struct net *net, u16 zone,
 {
 	return __nf_conntrack_alloc(net, zone, orig, repl, gfp, 0);
 }
+#endif
 EXPORT_SYMBOL_GPL(nf_conntrack_alloc);
 
 void nf_conntrack_free(struct nf_conn *ct)
 {
 	struct net *net = nf_ct_net(ct);
+
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	BL_OPS(net_netfilter_nf_conntrack_core_nf_conntrack_free(ct));
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	/* bugfix for lost connections */
+	spin_lock_bh(&nf_conntrack_lock);
+	list_del(&ct->safe_list);
+	spin_unlock_bh(&nf_conntrack_lock);
+#endif
 
 	nf_ct_ext_destroy(ct);
 	atomic_dec(&net->ct.count);
@@ -785,8 +1486,13 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 		return NULL;
 	}
 
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	ct = __nf_conntrack_alloc(net, zone, skb, tuple, &repl_tuple, GFP_ATOMIC,
+				  hash);
+#else
 	ct = __nf_conntrack_alloc(net, zone, tuple, &repl_tuple, GFP_ATOMIC,
 				  hash);
+#endif
 	if (IS_ERR(ct))
 		return (struct nf_conntrack_tuple_hash *)ct;
 
@@ -814,6 +1520,13 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 			     GFP_ATOMIC);
 
 	spin_lock_bh(&nf_conntrack_lock);
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	/* bugfix for lost connections */
+	if (ct->iq_prio == IQOS_PRIO_HIGH)
+		list_add_tail(&ct->safe_list, &hi_safe_list);
+	else
+		list_add_tail(&ct->safe_list, &lo_safe_list);
+#endif
 	exp = nf_ct_find_expectation(net, zone, tuple);
 	if (exp) {
 		pr_debug("conntrack: expectation arrives ct=%p exp=%p\n",
@@ -821,6 +1534,12 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 		/* Welcome, Mr. Bond.  We've been expecting you... */
 		__set_bit(IPS_EXPECTED_BIT, &ct->status);
 		ct->master = exp->master;
+#if defined(CONFIG_BCM_KF_NETFILTER)
+		list_add(&ct->derived_list,
+			 &exp->master->derived_connections);
+		if (exp->flags & NF_CT_EXPECT_DERIVED_TIMEOUT)
+			ct->derived_timeout = exp->derived_timeout;
+#endif
 		if (exp->helper) {
 			help = nf_ct_helper_ext_add(ct, GFP_ATOMIC);
 			if (help)
@@ -915,6 +1634,37 @@ resolve_normal_ct(struct net *net, struct nf_conn *tmpl,
 	}
 	skb->nfct = &ct->ct_general;
 	skb->nfctinfo = *ctinfo;
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	{
+		struct nf_conn_help * help = nfct_help(ct);
+
+		blog_lock();
+		if ((help != (struct nf_conn_help *)NULL) &&
+		    (help->helper != (struct nf_conntrack_helper *)NULL) &&
+		    (help->helper->name && strcmp(help->helper->name, "BCM-NAT"))) {
+			pr_debug("nf_conntrack_in: skb<%p> ct<%p> helper<%s> found\n",
+					skb, ct, help->helper->name);
+			clear_bit(IPS_BLOG_BIT, &ct->status);
+		}
+		if (test_bit(IPS_BLOG_BIT, &ct->status)) {	/* OK to blog ? */
+			uint32_t ct_type=(l3num==PF_INET)?BLOG_PARAM2_IPV4:BLOG_PARAM2_IPV6;
+			pr_debug("nf_conntrack_in: skb<%p> blog<%p> ct<%p>\n",
+						skb, blog_ptr(skb), ct);
+
+			if (protonum == IPPROTO_GRE)
+				ct_type = BLOG_PARAM2_GRE_IPV4;
+
+			blog_link(FLOWTRACK, blog_ptr(skb),
+					(void*)ct, CTINFO2DIR(skb->nfctinfo), ct_type);
+		} else {
+			pr_debug("nf_conntrack_in: skb<%p> ct<%p> NOT BLOGible<%p>\n",
+					skb, ct, blog_ptr(skb));
+			blog_skip(skb);		/* No blogging */
+		}
+		blog_unlock();
+	}
+#endif
+
 	return ct;
 }
 
@@ -1013,8 +1763,30 @@ nf_conntrack_in(struct net *net, u_int8_t pf, unsigned int hooknum,
 		goto out;
 	}
 
+#if defined(CONFIG_BCM_KF_RUNNER)
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	BL_OPS(net_netfilter_nf_conntrack_core_nf_conntrack_in(ct, skb));
+#endif /* CONFIG_BCM_RUNNER */
+#endif /* CONFIG_BCM_KF_RUNNER */
+
 	if (set_reply && !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
 		nf_conntrack_event_cache(IPCT_REPLY, ct);
+
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	/* Maintain LRU list. The least recently used ctt is on the head */
+	if (ctinfo == IP_CT_ESTABLISHED ||
+	    ctinfo == IP_CT_ESTABLISHED + IP_CT_IS_REPLY) {
+		spin_lock_bh(&nf_conntrack_lock);
+		/* Update ct as latest used */
+		if (ct->iq_prio == IQOS_PRIO_HIGH)
+			list_move_tail(&ct->safe_list, &hi_safe_list);
+		else
+			list_move_tail(&ct->safe_list, &lo_safe_list);
+
+		spin_unlock_bh(&nf_conntrack_lock);
+	}
+#endif
+
 out:
 	if (tmpl) {
 		/* Special case: we have to repeat this hook, assign the
@@ -1095,6 +1867,26 @@ void __nf_ct_refresh_acct(struct nf_conn *ct,
 			mod_timer_pending(&ct->timeout, newtime);
 	}
 
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BCM_KF_NETFILTER) && defined(CONFIG_BLOG)
+	blog_lock();
+	/* Check if the flow is blogged i.e. currently being accelerated */
+	if (ct->blog_key[BLOG_PARAM1_DIR_ORIG] != BLOG_KEY_NONE ||
+		ct->blog_key[BLOG_PARAM1_DIR_REPLY] != BLOG_KEY_NONE) {
+		/* Maintain LRU list. The least recently used ct is on the head */
+		/*
+		 * safe_list through blog refresh is updated at an interval refresh is called 
+		 * If that interval is large - it is possible that a connection getting high traffic 
+		 * may be seen as LRU by conntrack. 
+		 */
+		spin_lock_bh(&nf_conntrack_lock);
+		if (ct->iq_prio == IQOS_PRIO_HIGH)
+			list_move_tail(&ct->safe_list, &hi_safe_list);
+		else
+			list_move_tail(&ct->safe_list, &lo_safe_list);
+		spin_unlock_bh(&nf_conntrack_lock);
+	}
+	blog_unlock();
+#endif
 acct:
 	if (do_acct) {
 		struct nf_conn_counter *acct;
@@ -1344,13 +2136,29 @@ static void nf_conntrack_cleanup_init_net(void)
 
 static void nf_conntrack_cleanup_net(struct net *net)
 {
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	int try_counter = 0;
+	unsigned long start = jiffies;
+	unsigned long end = start + HZ;
+#endif
  i_see_dead_people:
 	nf_ct_iterate_cleanup(net, kill_all, NULL);
 	nf_ct_release_dying_list(net);
 	if (atomic_read(&net->ct.count) != 0) {
+#if defined(CONFIG_BCM_KF_NETFILTER)
+		if (jiffies >= end) {
+			printk("waiting for %d conntrack to be cleaned, "
+			       "tried %d times\n",
+			       atomic_read(&net->ct.count), try_counter);
+			end += HZ;
+		}
+		try_counter++;
+#endif
 		schedule();
 		goto i_see_dead_people;
 	}
+
+	Zy_UDP_deinit_proc();
 
 	nf_ct_free_hashtable(net->ct.hash, net->ct.htable_size);
 	nf_conntrack_timeout_fini(net);
@@ -1361,6 +2169,12 @@ static void nf_conntrack_cleanup_net(struct net *net)
 	kmem_cache_destroy(net->ct.nf_conntrack_cachep);
 	kfree(net->ct.slabname);
 	free_percpu(net->ct.stat);
+#if defined(CONFIG_BCM_KF_NETFILTER)
+	end = jiffies;
+	if (end - start > HZ)
+		printk("nf_conntrack took %lu milliseconds to clean up\n",
+		       (end - start) * 1000 / HZ);
+#endif
 }
 
 /* Mishearing the voices in his head, our hero wonders how he's
@@ -1475,7 +2289,9 @@ static int nf_conntrack_init_init_net(void)
 {
 	int max_factor = 8;
 	int ret, cpu;
-
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	nf_session_ctl_max =2048;
+#endif
 	/* Idea from tcp.c: use 1/16384 of memory.  On i386: 32MB
 	 * machine has 512 buckets. >= 1GB machines have 16384 buckets. */
 	if (!nf_conntrack_htable_size) {
@@ -1589,8 +2405,20 @@ static int nf_conntrack_init_net(struct net *net)
 	if (ret < 0)
 		goto err_timeout;
 
+	ret = Zy_UDP_init_proc();
+	if (ret < 0)
+		goto err_proto_zy_udp;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+	blog_cttime_update_fn = (blog_cttime_upd_t)__nf_ct_time_update;
+#endif
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	 net->ct.session_control_table = nf_ct_alloc_hashtable(&nf_conntrack_htable_size, 1);
+#endif
 	return 0;
 
+err_proto_zy_udp:
+	 Zy_UDP_deinit_proc();
 err_timeout:
 	nf_conntrack_ecache_fini(net);
 err_ecache:
@@ -1603,6 +2431,9 @@ err_expect:
 	nf_ct_free_hashtable(net->ct.hash, net->ct.htable_size);
 err_hash:
 	kmem_cache_destroy(net->ct.nf_conntrack_cachep);
+#ifdef CONFIG_ZYXEL_NF_SESSION_CTL//__ZYXEL__, Chi-Hsiang /proc/net/nf_session_ctl
+	nf_ct_free_hashtable(net->ct.session_control_table, nf_conntrack_htable_size);
+#endif
 err_cache:
 	kfree(net->ct.slabname);
 err_slabname:
@@ -1615,6 +2446,119 @@ s16 (*nf_ct_nat_offset)(const struct nf_conn *ct,
 			enum ip_conntrack_dir dir,
 			u32 seq);
 EXPORT_SYMBOL_GPL(nf_ct_nat_offset);
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+int blog_dpi_ctk_update(uint32_t appid)
+{
+	struct nf_conn *ct = NULL;
+	struct list_head *tmp;
+
+	spin_lock_bh(&nf_conntrack_lock);
+	if (!list_empty(&lo_safe_list)) {
+		list_for_each(tmp, &lo_safe_list) {
+			ct = container_of(tmp, struct nf_conn, safe_list);
+			if ( (ct->dpi.app_id == appid) &&
+				 ( (ct->blog_key[IP_CT_DIR_ORIGINAL] != BLOG_KEY_NONE) ||
+				   (ct->blog_key[IP_CT_DIR_REPLY] != BLOG_KEY_NONE) ) )
+				blog_notify(CONFIG_CHANGE, (void*)ct,
+							(uint32_t)ct->blog_key[IP_CT_DIR_ORIGINAL],
+							(uint32_t)ct->blog_key[IP_CT_DIR_REPLY]);
+		}
+	}
+
+	if (!list_empty(&hi_safe_list)) {
+		list_for_each(tmp, &hi_safe_list) {
+			ct = container_of(tmp, struct nf_conn, safe_list);
+			if ( (ct->dpi.app_id == appid) &&
+				 ( (ct->blog_key[IP_CT_DIR_ORIGINAL] != BLOG_KEY_NONE) ||
+				   (ct->blog_key[IP_CT_DIR_REPLY] != BLOG_KEY_NONE) ) )
+				blog_notify(CONFIG_CHANGE, (void*)ct,
+							(uint32_t)ct->blog_key[IP_CT_DIR_ORIGINAL],
+							(uint32_t)ct->blog_key[IP_CT_DIR_REPLY]);
+		}
+	}
+	spin_unlock_bh(&nf_conntrack_lock);
+
+    return 0;
+}
+EXPORT_SYMBOL(blog_dpi_ctk_update);
+
+int nf_conntrack_dpistat_update(struct net *net)
+{
+	struct nf_conntrack_tuple_hash *h;
+	struct nf_conn *ct;
+	struct hlist_nulls_node *n;
+	unsigned int bucket=0;
+
+	for (; bucket < net->ct.htable_size; bucket++) {
+		if (bucket < net->ct.htable_size) {
+			hlist_nulls_for_each_entry_rcu(h, n, &net->ct.hash[bucket], hnnode) {
+				if (NF_CT_DIRECTION(h) != IP_CT_DIR_ORIGINAL)
+					continue;
+				ct = nf_ct_tuplehash_to_ctrack(h);
+
+				if ( ct->dpi.app_id != 0 )
+				{
+					DpiStatsEntry_t stats;
+
+					if (ct->stats_idx == DPISTATS_IX_INVALID)
+						continue;
+
+					stats.result.app_id = ct->dpi.app_id;
+					stats.result.dev_key = ct->dpi.dev_key;
+					stats.result.flags = ct->dpi.flags;
+
+					if (!IS_CTK_INIT_FROM_WAN(ct))
+					{
+						if (conntrack_get_stats(ct, IP_CT_DIR_ORIGINAL, &stats.upstream))
+						{
+							printk("1conntrack_get_stats(upstream) fails");
+							continue;
+						}
+
+						if ((test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
+						{
+							if (conntrack_get_stats(ct, IP_CT_DIR_REPLY, &stats.dnstream))
+							{
+								printk("1conntrack_get_stats(dnstream) fails");
+								continue;
+							}
+						}
+						else
+							memset(&stats.dnstream, 0 , sizeof(CtkStats_t));
+					}
+					else /* origin direction is dnstream */
+					{
+						if (conntrack_get_stats(ct, IP_CT_DIR_ORIGINAL, &stats.dnstream))
+						{
+							printk("2conntrack_get_stats(dnstream) fails");
+							continue;
+						}
+
+						if ((test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
+						{
+							if (conntrack_get_stats(ct, IP_CT_DIR_REPLY, &stats.upstream))
+							{
+								printk("2conntrack_get_stats(upstream) fails");
+								continue;
+							}
+						}
+						else
+							memset(&stats.upstream, 0 , sizeof(CtkStats_t));
+					}
+
+					dpistats_info(ct->stats_idx, &stats);
+				}
+			}
+		}
+	}
+
+    return 0;
+}
+EXPORT_SYMBOL(nf_conntrack_dpistat_update);
+#endif
+#endif
 
 int nf_conntrack_init(struct net *net)
 {
@@ -1637,6 +2581,11 @@ int nf_conntrack_init(struct net *net)
 		/* Howto get NAT offsets */
 		RCU_INIT_POINTER(nf_ct_nat_offset, NULL);
 	}
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG)
+#if defined(CONFIG_BCM_KF_DPI) && defined(CONFIG_BRCM_DPI)
+	blog_dpi_ctk_update_fn = (blog_dpi_ctk_update_t) blog_dpi_ctk_update;
+#endif
+#endif
 	return 0;
 
 out_net:
@@ -1645,3 +2594,115 @@ out_net:
 out_init_net:
 	return ret;
 }
+
+static int proc_STB_timeout_read(char *buffer,char **buffer_location,
+					off_t offset, int buffer_length, int *eof, void *data)
+{
+	int ret=0;
+	char temp[80];
+
+	if (offset > 0)	{
+		/* we have finished to read, return 0 */
+ 		ret  = 0;
+	}	else 	{
+		/* fill the buffer, return the buffer size */
+		sprintf(temp,"%d\n",nf_ct_udp_STB_timeout );
+		ret = sprintf(buffer, temp);
+	}
+	return ret;
+}
+
+static int proc_STB_timeout_write(struct file *file, const char *buf, unsigned long count, void *data)
+{
+	char local_buf[20];
+	int len;
+
+	len = sizeof(local_buf) < count ? sizeof(local_buf) - 1 : count;
+	len = len - copy_from_user(local_buf, buf, len);
+	local_buf[len] = 0;
+
+	sscanf(local_buf,"%d",&nf_ct_udp_STB_timeout);
+	printk("\n Settting nf_ct_udp_STB_timeout : %d\n", nf_ct_udp_STB_timeout);
+
+    return count;
+}
+
+static int proc_STB_port_read(char *buffer,char **buffer_location,
+					off_t offset, int buffer_length, int *eof, void *data)
+{
+	int ret=0;
+	char temp[80];
+
+	if (offset > 0)	{
+		/* we have finished to read, return 0 */
+ 		ret  = 0;
+	}	else 	{
+		/* fill the buffer, return the buffer size */
+		sprintf(temp,"%d\n",nf_ct_udp_STB_port );
+		ret = sprintf(buffer, temp);
+	}
+	return ret;
+}
+
+static int proc_STB_port_write(struct file *file, const char *buf, unsigned long count, void *data)
+{
+	char local_buf[20];
+	int len;
+
+	len = sizeof(local_buf) < count ? sizeof(local_buf) - 1 : count;
+	len = len - copy_from_user(local_buf, buf, len);
+	local_buf[len] = 0;
+
+	sscanf(local_buf,"%d",&nf_ct_udp_STB_port);
+	printk("\n Settting nf_ct_udp_STB_port : %d\n", nf_ct_udp_STB_port);
+
+    return count;
+}
+
+
+int Zy_UDP_init_proc(void)
+{
+	struct proc_dir_entry *proc_zy_nf_ct_udp_STB_port, *proc_zy_nf_ct_udp_STB_timeout;
+
+	//STB port part
+	proc_zy_nf_ct_udp_STB_port = create_proc_entry(PROC_STB_PORT, 0644, NULL);
+	if (proc_zy_nf_ct_udp_STB_port == NULL) {
+		printk(KERN_ALERT "Error: Could not initialize /proc/%s\n", PROC_STB_PORT);
+		// return -ENOMEM;
+		return -1;
+	}
+
+	proc_zy_nf_ct_udp_STB_port->read_proc  = proc_STB_port_read;
+	proc_zy_nf_ct_udp_STB_port->write_proc = proc_STB_port_write;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
+	proc_zy_nf_ct_udp_STB_port->owner 	 = THIS_MODULE;
+#endif
+	printk(KERN_INFO "/proc/%s created\n", PROC_STB_PORT);
+
+
+	//STB timeout part
+	proc_zy_nf_ct_udp_STB_timeout = create_proc_entry(PROC_STB_TIMEOUT, 0644, NULL);
+	if (proc_zy_nf_ct_udp_STB_timeout == NULL){
+		printk(KERN_ALERT "Error: Could not initialize /proc/%s\n", PROC_STB_TIMEOUT);
+		// return -ENOMEM;
+		return -1;
+	}
+
+	proc_zy_nf_ct_udp_STB_timeout->read_proc  = proc_STB_timeout_read;
+	proc_zy_nf_ct_udp_STB_timeout->write_proc = proc_STB_timeout_write;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
+	proc_zy_nf_ct_udp_STB_timeout->owner 	 = THIS_MODULE;
+#endif
+	printk(KERN_INFO "/proc/%s created\n", PROC_STB_TIMEOUT);
+
+	return 0;	/* everything is ok */
+}
+
+void  Zy_UDP_deinit_proc(void)
+{
+	remove_proc_entry(PROC_STB_TIMEOUT, NULL);
+	printk(KERN_INFO "/proc/%s remove\n", PROC_STB_TIMEOUT);
+	remove_proc_entry(PROC_STB_PORT, NULL);
+	printk(KERN_INFO "/proc/%s remove\n", PROC_STB_PORT);
+}
+

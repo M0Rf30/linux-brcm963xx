@@ -107,21 +107,46 @@ found:
  *	0 - deliver
  *	1 - block
  */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static __inline__ int icmpv6_filter(struct sock *sk, struct sk_buff *skb)
+#else
+static int icmpv6_filter(const struct sock *sk, const struct sk_buff *skb)
+#endif
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	struct icmp6hdr *icmph;
 	struct raw6_sock *rp = raw6_sk(sk);
 
 	if (pskb_may_pull(skb, sizeof(struct icmp6hdr))) {
 		__u32 *data = &rp->filter.data[0];
 		int bit_nr;
+#else
+	struct icmp6hdr *_hdr;
+	const struct icmp6hdr *hdr;
+#endif
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		icmph = (struct icmp6hdr *) skb->data;
 		bit_nr = icmph->icmp6_type;
+#else
+	hdr = skb_header_pointer(skb, skb_transport_offset(skb),
+				 sizeof(_hdr), &_hdr);
+	if (hdr) {
+		const __u32 *data = &raw6_sk(sk)->filter.data[0];
+		unsigned int type = hdr->icmp6_type;
+#endif
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		return (data[bit_nr >> 5] & (1 << (bit_nr & 31))) != 0;
+#else
+		return (data[type >> 5] & (1U << (type & 31))) != 0;
+#endif
 	}
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	return 0;
+#else
+	return 1;
+#endif
 }
 
 #if defined(CONFIG_IPV6_MIP6) || defined(CONFIG_IPV6_MIP6_MODULE)
@@ -155,15 +180,25 @@ EXPORT_SYMBOL(rawv6_mh_filter_unregister);
  */
 static int ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 {
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	struct in6_addr saddr;
+	struct in6_addr daddr;
+#else
 	const struct in6_addr *saddr;
 	const struct in6_addr *daddr;
+#endif
 	struct sock *sk;
 	int delivered = 0;
 	__u8 hash;
 	struct net *net;
 
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	memcpy(&saddr, &ipv6_hdr(skb)->saddr, sizeof(struct in6_addr));
+	memcpy(&daddr, &ipv6_hdr(skb)->daddr, sizeof(struct in6_addr));
+#else
 	saddr = &ipv6_hdr(skb)->saddr;
 	daddr = saddr + 1;
+#endif
 
 	hash = nexthdr & (MAX_INET_PROTOS - 1);
 
@@ -174,8 +209,11 @@ static int ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 		goto out;
 
 	net = dev_net(skb->dev);
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	sk = __raw_v6_lookup(net, sk, nexthdr, &daddr, &saddr, IP6CB(skb)->iif);
+#else
 	sk = __raw_v6_lookup(net, sk, nexthdr, daddr, saddr, IP6CB(skb)->iif);
-
+#endif
 	while (sk) {
 		int filtered;
 
@@ -217,8 +255,13 @@ static int ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 				rawv6_rcv(sk, clone);
 			}
 		}
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		sk = __raw_v6_lookup(net, sk_next(sk), nexthdr, &daddr, &saddr,
+				     IP6CB(skb)->iif);
+#else
 		sk = __raw_v6_lookup(net, sk_next(sk), nexthdr, daddr, saddr,
 				     IP6CB(skb)->iif);
+#endif
 	}
 out:
 	read_unlock(&raw_v6_hashinfo.lock);
@@ -403,6 +446,10 @@ int rawv6_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct raw6_sock *rp = raw6_sk(sk);
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	struct in6_addr dstAddr;
+	struct in6_addr srcAddr;
+#endif
 
 	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb)) {
 		atomic_inc(&sk->sk_drops);
@@ -413,19 +460,37 @@ int rawv6_rcv(struct sock *sk, struct sk_buff *skb)
 	if (!rp->checksum)
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	memcpy(&srcAddr, &ipv6_hdr(skb)->saddr, sizeof(struct in6_addr));
+	memcpy(&dstAddr, &ipv6_hdr(skb)->daddr, sizeof(struct in6_addr));
+#endif
+
 	if (skb->ip_summed == CHECKSUM_COMPLETE) {
 		skb_postpull_rcsum(skb, skb_network_header(skb),
 				   skb_network_header_len(skb));
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		if (!csum_ipv6_magic(&srcAddr, &dstAddr,
+				     skb->len, inet->inet_num, skb->csum))
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
+#else
 		if (!csum_ipv6_magic(&ipv6_hdr(skb)->saddr,
 				     &ipv6_hdr(skb)->daddr,
 				     skb->len, inet->inet_num, skb->csum))
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
+#endif
 	}
 	if (!skb_csum_unnecessary(skb))
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		skb->csum = ~csum_unfold(csum_ipv6_magic(&srcAddr,
+							 &dstAddr,
+							 skb->len,
+							 inet->inet_num, 0));
+#else
 		skb->csum = ~csum_unfold(csum_ipv6_magic(&ipv6_hdr(skb)->saddr,
 							 &ipv6_hdr(skb)->daddr,
 							 skb->len,
 							 inet->inet_num, 0));
+#endif
 
 	if (inet->hdrincl) {
 		if (skb_checksum_complete(skb)) {
@@ -965,6 +1030,7 @@ static int do_rawv6_setsockopt(struct sock *sk, int level, int optname,
 
 	switch (optname) {
 	case IPV6_CHECKSUM:
+#if !defined(CONFIG_BCM_KF_IP)
 		if (inet_sk(sk)->inet_num == IPPROTO_ICMPV6 &&
 		    level == IPPROTO_IPV6) {
 			/*
@@ -977,6 +1043,7 @@ static int do_rawv6_setsockopt(struct sock *sk, int level, int optname,
 			 */
 			return -EINVAL;
 		}
+#endif
 
 		/* You may get strange result with a positive odd offset;
 		   RFC2292bis agrees with me. */

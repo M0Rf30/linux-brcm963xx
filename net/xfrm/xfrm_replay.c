@@ -45,6 +45,9 @@ u32 xfrm_replay_seqhi(struct xfrm_state *x, __be32 net_seq)
 
 	return seq_hi;
 }
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+EXPORT_SYMBOL(xfrm_replay_seqhi);
+#endif
 
 static void xfrm_replay_notify(struct xfrm_state *x, int event)
 {
@@ -98,9 +101,16 @@ static int xfrm_replay_overflow(struct xfrm_state *x, struct sk_buff *skb)
 	struct net *net = xs_net(x);
 
 	if (x->type->flags & XFRM_TYPE_REPLAY_PROT) {
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+		if ( skb == NULL ) ++x->replay.oseq;
+		else
+#endif
 		XFRM_SKB_CB(skb)->seq.output.low = ++x->replay.oseq;
 		if (unlikely(x->replay.oseq == 0)) {
 			x->replay.oseq--;
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+			if ( skb != NULL )
+#endif
 			xfrm_audit_state_replay_overflow(x, skb);
 			err = -EOVERFLOW;
 
@@ -142,6 +152,9 @@ static int xfrm_replay_check(struct xfrm_state *x,
 	return 0;
 
 err:
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+	if ( skb != NULL )
+#endif
 	xfrm_audit_state_replay(x, skb, net_seq);
 	return -EINVAL;
 }
@@ -177,9 +190,16 @@ static int xfrm_replay_overflow_bmp(struct xfrm_state *x, struct sk_buff *skb)
 	struct net *net = xs_net(x);
 
 	if (x->type->flags & XFRM_TYPE_REPLAY_PROT) {
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+		if ( skb == NULL ) ++replay_esn->oseq;
+		else
+#endif
 		XFRM_SKB_CB(skb)->seq.output.low = ++replay_esn->oseq;
 		if (unlikely(replay_esn->oseq == 0)) {
 			replay_esn->oseq--;
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+		if ( skb != NULL )
+#endif
 			xfrm_audit_state_replay_overflow(x, skb);
 			err = -EOVERFLOW;
 
@@ -232,6 +252,9 @@ static int xfrm_replay_check_bmp(struct xfrm_state *x,
 err_replay:
 	x->stats.replay++;
 err:
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+	if ( skb != NULL )
+#endif
 	xfrm_audit_state_replay(x, skb, net_seq);
 	return -EINVAL;
 }
@@ -339,6 +362,23 @@ static int xfrm_replay_overflow_esn(struct xfrm_state *x, struct sk_buff *skb)
 	struct net *net = xs_net(x);
 
 	if (x->type->flags & XFRM_TYPE_REPLAY_PROT) {
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+		if ( skb == NULL )
+		{
+			++replay_esn->oseq;
+			if (unlikely(replay_esn->oseq == 0)) {
+				++replay_esn->oseq_hi;
+				if (replay_esn->oseq_hi == 0) {
+					replay_esn->oseq--;
+					replay_esn->oseq_hi--;
+				err = -EOVERFLOW;
+				return err;
+				}
+			}
+		}
+		else
+		{
+#endif
 		XFRM_SKB_CB(skb)->seq.output.low = ++replay_esn->oseq;
 		XFRM_SKB_CB(skb)->seq.output.hi = replay_esn->oseq_hi;
 
@@ -354,6 +394,9 @@ static int xfrm_replay_overflow_esn(struct xfrm_state *x, struct sk_buff *skb)
 				return err;
 			}
 		}
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE)) && (defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)) && defined(CONFIG_BLOG)
+		}
+#endif
 		if (xfrm_aevent_is_on(net))
 			x->repl->notify(x, XFRM_REPLAY_UPDATE);
 	}
@@ -420,6 +463,20 @@ err:
 	return -EINVAL;
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static int xfrm_replay_recheck_esn(struct xfrm_state *x,
+				   struct sk_buff *skb, __be32 net_seq)
+{
+	if (unlikely(XFRM_SKB_CB(skb)->seq.input.hi !=
+		     htonl(xfrm_replay_seqhi(x, net_seq)))) {
+			x->stats.replay_window++;
+			return -EINVAL;
+	}
+
+	return xfrm_replay_check_esn(x, skb, net_seq);
+}
+
+#endif
 static void xfrm_replay_advance_esn(struct xfrm_state *x, __be32 net_seq)
 {
 	unsigned int bitnr, nr, i;
@@ -479,6 +536,9 @@ static void xfrm_replay_advance_esn(struct xfrm_state *x, __be32 net_seq)
 static struct xfrm_replay xfrm_replay_legacy = {
 	.advance	= xfrm_replay_advance,
 	.check		= xfrm_replay_check,
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	.recheck	= xfrm_replay_check,
+#endif
 	.notify		= xfrm_replay_notify,
 	.overflow	= xfrm_replay_overflow,
 };
@@ -486,6 +546,9 @@ static struct xfrm_replay xfrm_replay_legacy = {
 static struct xfrm_replay xfrm_replay_bmp = {
 	.advance	= xfrm_replay_advance_bmp,
 	.check		= xfrm_replay_check_bmp,
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	.recheck	= xfrm_replay_check_bmp,
+#endif
 	.notify		= xfrm_replay_notify_bmp,
 	.overflow	= xfrm_replay_overflow_bmp,
 };
@@ -493,6 +556,9 @@ static struct xfrm_replay xfrm_replay_bmp = {
 static struct xfrm_replay xfrm_replay_esn = {
 	.advance	= xfrm_replay_advance_esn,
 	.check		= xfrm_replay_check_esn,
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	.recheck	= xfrm_replay_recheck_esn,
+#endif
 	.notify		= xfrm_replay_notify_bmp,
 	.overflow	= xfrm_replay_overflow_esn,
 };

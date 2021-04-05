@@ -44,6 +44,34 @@ ebt_vlan_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	unsigned short id;	/* VLAN ID, given from frame TCI */
 	unsigned char prio;	/* user_priority, given from frame TCI */
 	/* VLAN encapsulated Type/Length field, given from orig frame */
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+	__be16 encap = 0;
+	const struct vlan_hdr *fp;
+	struct vlan_hdr _frame;
+
+    if(ntohs(((struct vlan_hdr *)(skb->vlan_header))->h_vlan_encapsulated_proto) == 0){
+	fp = skb_header_pointer(skb, 0, sizeof(_frame), &_frame);
+	if (fp == NULL)
+		return false;
+
+	/* Tag Control Information (TCI) consists of the following elements:
+	 * - User_priority. The user_priority field is three bits in length,
+	 * interpreted as a binary number.
+	 * - Canonical Format Indicator (CFI). The Canonical Format Indicator
+	 * (CFI) is a single bit flag value. Currently ignored.
+	 * - VLAN Identifier (VID). The VID is encoded as
+	 * an unsigned binary number. */
+	TCI = ntohs(fp->h_vlan_TCI);
+	id = TCI & VLAN_VID_MASK;
+	prio = (TCI >> 13) & 0x7;
+	encap = fp->h_vlan_encapsulated_proto;
+    }else{
+        // for new broadcom vlan device
+        TCI = ((struct vlan_hdr *)(skb->vlan_header))->h_vlan_TCI;
+	    id = TCI & VLAN_VID_MASK;
+	    prio = (TCI >> 13) & 0x7;
+    }
+#else
 	__be16 encap;
 
 	if (vlan_tx_tag_present(skb)) {
@@ -70,7 +98,7 @@ ebt_vlan_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	 * an unsigned binary number. */
 	id = TCI & VLAN_VID_MASK;
 	prio = (TCI >> 13) & 0x7;
-
+#endif
 	/* Checking VLAN Identifier (VID) */
 	if (GET_BITMASK(EBT_VLAN_ID))
 		EXIT_ON_MISMATCH(id, EBT_VLAN_ID);
@@ -130,7 +158,9 @@ static int ebt_vlan_mt_check(const struct xt_mtchk_param *par)
 			 * Any value of user_priority are acceptable,
 			 * but should be ignored according to 802.1Q Std.
 			 * So we just drop the prio flag. */
+#if 0 /* ZyXEL QoS, John (porting from MSTC) */
 			info->bitmask &= ~EBT_VLAN_PRIO;
+#endif
 		}
 		/* Else, id=0 (null VLAN ID)  => user_priority range (any?) */
 	}

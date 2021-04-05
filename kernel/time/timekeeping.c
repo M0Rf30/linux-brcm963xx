@@ -76,8 +76,9 @@ struct timekeeper {
 	/* Offset clock monotonic -> clock boottime */
 	ktime_t offs_boot;
 
-	/* Seqlock for all timekeeper values */
-	seqlock_t lock;
+	/* Open coded seqlock for all timekeeper values */
+	seqcount_t seq;
+	raw_spinlock_t lock;
 };
 
 static struct timekeeper timekeeper;
@@ -86,7 +87,8 @@ static struct timekeeper timekeeper;
  * This read-write spinlock protects us from races in SMP while
  * playing with xtime.
  */
-__cacheline_aligned_in_smp DEFINE_SEQLOCK(xtime_lock);
+__cacheline_aligned_in_smp DEFINE_RAW_SPINLOCK(xtime_lock);
+seqcount_t xtime_seq;
 
 
 /* flag for if timekeeping is suspended */
@@ -243,7 +245,7 @@ void getnstimeofday(struct timespec *ts)
 	WARN_ON(timekeeping_suspended);
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		*ts = timekeeper.xtime;
 		nsecs = timekeeping_get_ns();
@@ -251,7 +253,7 @@ void getnstimeofday(struct timespec *ts)
 		/* If arch requires, add in gettimeoffset() */
 		nsecs += arch_gettimeoffset();
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	timespec_add_ns(ts, nsecs);
 }
@@ -266,7 +268,7 @@ ktime_t ktime_get(void)
 	WARN_ON(timekeeping_suspended);
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		secs = timekeeper.xtime.tv_sec +
 				timekeeper.wall_to_monotonic.tv_sec;
 		nsecs = timekeeper.xtime.tv_nsec +
@@ -275,7 +277,7 @@ ktime_t ktime_get(void)
 		/* If arch requires, add in gettimeoffset() */
 		nsecs += arch_gettimeoffset();
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 	/*
 	 * Use ktime_set/ktime_add_ns to create a proper ktime on
 	 * 32-bit architectures without CONFIG_KTIME_SCALAR.
@@ -301,14 +303,14 @@ void ktime_get_ts(struct timespec *ts)
 	WARN_ON(timekeeping_suspended);
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		*ts = timekeeper.xtime;
 		tomono = timekeeper.wall_to_monotonic;
 		nsecs = timekeeping_get_ns();
 		/* If arch requires, add in gettimeoffset() */
 		nsecs += arch_gettimeoffset();
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec,
 				ts->tv_nsec + tomono.tv_nsec + nsecs);
@@ -336,7 +338,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
 	do {
 		u32 arch_offset;
 
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		*ts_raw = timekeeper.raw_time;
 		*ts_real = timekeeper.xtime;
@@ -349,7 +351,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
 		nsecs_raw += arch_offset;
 		nsecs_real += arch_offset;
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	timespec_add_ns(ts_raw, nsecs_raw);
 	timespec_add_ns(ts_real, nsecs_real);
@@ -385,10 +387,15 @@ int do_settimeofday(const struct timespec *tv)
 	struct timespec ts_delta;
 	unsigned long flags;
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+#else
+	if (!timespec_valid_strict(tv))
+#endif
 		return -EINVAL;
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	timekeeping_forward_now();
 
@@ -400,7 +407,8 @@ int do_settimeofday(const struct timespec *tv)
 	timekeeper.xtime = *tv;
 	timekeeping_update(true);
 
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	/* signal hrtimers about time change */
 	clock_was_set();
@@ -420,26 +428,47 @@ EXPORT_SYMBOL(do_settimeofday);
 int timekeeping_inject_offset(struct timespec *ts)
 {
 	unsigned long flags;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	struct timespec tmp;
+	int ret = 0;
+#endif
 
 	if ((unsigned long)ts->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	timekeeping_forward_now();
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	tmp = timespec_add(timekeeper.xtime,  *ts);
+	if (!timespec_valid_strict(&tmp)) {
+		ret = -EINVAL;
+		goto error;
+	}
+
+#endif
 	timekeeper.xtime = timespec_add(timekeeper.xtime, *ts);
 	timekeeper.wall_to_monotonic =
 				timespec_sub(timekeeper.wall_to_monotonic, *ts);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+error: /* even if we error out, we forwarded the time, so call update */
+#endif
 	timekeeping_update(true);
 
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	/* signal hrtimers about time change */
 	clock_was_set();
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	return 0;
+#else
+	return ret;
+#endif
 }
 EXPORT_SYMBOL(timekeeping_inject_offset);
 
@@ -455,7 +484,8 @@ static int change_clocksource(void *data)
 
 	new = (struct clocksource *) data;
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	timekeeping_forward_now();
 	if (!new->enable || new->enable(new) == 0) {
@@ -466,7 +496,8 @@ static int change_clocksource(void *data)
 	}
 	timekeeping_update(true);
 
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	return 0;
 }
@@ -513,11 +544,11 @@ void getrawmonotonic(struct timespec *ts)
 	s64 nsecs;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		nsecs = timekeeping_get_ns_raw();
 		*ts = timekeeper.raw_time;
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	timespec_add_ns(ts, nsecs);
 }
@@ -533,11 +564,11 @@ int timekeeping_valid_for_hres(void)
 	int ret;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		ret = timekeeper.clock->flags & CLOCK_SOURCE_VALID_FOR_HRES;
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	return ret;
 }
@@ -550,11 +581,11 @@ u64 timekeeping_max_deferment(void)
 	unsigned long seq;
 	u64 ret;
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		ret = timekeeper.clock->max_idle_ns;
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	return ret;
 }
@@ -599,13 +630,32 @@ void __init timekeeping_init(void)
 	struct timespec now, boot;
 
 	read_persistent_clock(&now);
-	read_boot_clock(&boot);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (!timespec_valid_strict(&now)) {
+		pr_warn("WARNING: Persistent clock returned invalid value!\n"
+			"         Check your CMOS/BIOS settings.\n");
+		now.tv_sec = 0;
+		now.tv_nsec = 0;
+	}
 
-	seqlock_init(&timekeeper.lock);
+#endif
+	read_boot_clock(&boot);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	if (!timespec_valid_strict(&boot)) {
+		pr_warn("WARNING: Boot clock returned invalid value!\n"
+			"         Check your CMOS/BIOS settings.\n");
+		boot.tv_sec = 0;
+		boot.tv_nsec = 0;
+	}
+#endif
+
+	raw_spin_lock_init(&timekeeper.lock);
+	seqcount_init(&timekeeper.seq);
 
 	ntp_init();
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 	clock = clocksource_default_clock();
 	if (clock->enable)
 		clock->enable(clock);
@@ -624,7 +674,8 @@ void __init timekeeping_init(void)
 	update_rt_offset();
 	timekeeper.total_sleep_time.tv_sec = 0;
 	timekeeper.total_sleep_time.tv_nsec = 0;
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 }
 
 /* time in seconds when suspend began */
@@ -645,7 +696,11 @@ static void update_sleep_time(struct timespec t)
  */
 static void __timekeeping_inject_sleeptime(struct timespec *delta)
 {
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	if (!timespec_valid(delta)) {
+#else
+	if (!timespec_valid_strict(delta)) {
+#endif
 		printk(KERN_WARNING "__timekeeping_inject_sleeptime: Invalid "
 					"sleep delta value!\n");
 		return;
@@ -678,7 +733,8 @@ void timekeeping_inject_sleeptime(struct timespec *delta)
 	if (!(ts.tv_sec == 0 && ts.tv_nsec == 0))
 		return;
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	timekeeping_forward_now();
 
@@ -686,7 +742,8 @@ void timekeeping_inject_sleeptime(struct timespec *delta)
 
 	timekeeping_update(true);
 
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	/* signal hrtimers about time change */
 	clock_was_set();
@@ -709,7 +766,8 @@ static void timekeeping_resume(void)
 
 	clocksource_resume();
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	if (timespec_compare(&ts, &timekeeping_suspend_time) > 0) {
 		ts = timespec_sub(ts, timekeeping_suspend_time);
@@ -720,7 +778,8 @@ static void timekeeping_resume(void)
 	timekeeper.ntp_error = 0;
 	timekeeping_suspended = 0;
 	timekeeping_update(false);
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	touch_softlockup_watchdog();
 
@@ -738,7 +797,8 @@ static int timekeeping_suspend(void)
 
 	read_persistent_clock(&timekeeping_suspend_time);
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 	timekeeping_forward_now();
 	timekeeping_suspended = 1;
 
@@ -761,7 +821,8 @@ static int timekeeping_suspend(void)
 		timekeeping_suspend_time =
 			timespec_add(timekeeping_suspend_time, delta_delta);
 	}
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 
 	clockevents_notify(CLOCK_EVT_NOTIFY_SUSPEND, NULL);
 	clocksource_suspend();
@@ -992,7 +1053,11 @@ static cycle_t logarithmic_accumulation(cycle_t offset, int shift)
 	}
 
 	/* Accumulate raw time */
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 	raw_nsecs = timekeeper.raw_interval << shift;
+#else
+	raw_nsecs = (u64)timekeeper.raw_interval << shift;
+#endif
 	raw_nsecs += timekeeper.raw_time.tv_nsec;
 	if (raw_nsecs >= NSEC_PER_SEC) {
 		u64 raw_secs = raw_nsecs;
@@ -1022,7 +1087,8 @@ static void update_wall_time(void)
 	int shift = 0, maxshift;
 	unsigned long flags;
 
-	write_seqlock_irqsave(&timekeeper.lock, flags);
+	raw_spin_lock_irqsave(&timekeeper.lock, flags);
+	write_seqcount_begin(&timekeeper.seq);
 
 	/* Make sure we're fully resumed: */
 	if (unlikely(timekeeping_suspended))
@@ -1035,9 +1101,17 @@ static void update_wall_time(void)
 #else
 	offset = (clock->read(clock) - clock->cycle_last) & clock->mask;
 #endif
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	/* Check if there's really nothing to do */
+	if (offset < timekeeper.cycle_interval)
+		goto out;
+
+#endif
 	timekeeper.xtime_nsec = (s64)timekeeper.xtime.tv_nsec <<
 						timekeeper.shift;
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 
+#endif
 	/*
 	 * With NO_HZ we may have to accumulate many cycle_intervals
 	 * (think "ticks") worth of time at once. To do this efficiently,
@@ -1112,8 +1186,8 @@ static void update_wall_time(void)
 	timekeeping_update(false);
 
 out:
-	write_sequnlock_irqrestore(&timekeeper.lock, flags);
-
+	write_seqcount_end(&timekeeper.seq);
+	raw_spin_unlock_irqrestore(&timekeeper.lock, flags);
 }
 
 /**
@@ -1159,16 +1233,20 @@ void get_monotonic_boottime(struct timespec *ts)
 	WARN_ON(timekeeping_suspended);
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		*ts = timekeeper.xtime;
 		tomono = timekeeper.wall_to_monotonic;
 		sleep = timekeeper.total_sleep_time;
 		nsecs = timekeeping_get_ns();
 
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec + sleep.tv_sec,
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			ts->tv_nsec + tomono.tv_nsec + sleep.tv_nsec + nsecs);
+#else
+		(s64)ts->tv_nsec + tomono.tv_nsec + sleep.tv_nsec + nsecs);
+#endif
 }
 EXPORT_SYMBOL_GPL(get_monotonic_boottime);
 
@@ -1216,10 +1294,10 @@ struct timespec current_kernel_time(void)
 	unsigned long seq;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		now = timekeeper.xtime;
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	return now;
 }
@@ -1231,11 +1309,11 @@ struct timespec get_monotonic_coarse(void)
 	unsigned long seq;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		now = timekeeper.xtime;
 		mono = timekeeper.wall_to_monotonic;
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	set_normalized_timespec(&now, now.tv_sec + mono.tv_sec,
 				now.tv_nsec + mono.tv_nsec);
@@ -1267,11 +1345,11 @@ void get_xtime_and_monotonic_and_sleep_offset(struct timespec *xtim,
 	unsigned long seq;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		*xtim = timekeeper.xtime;
 		*wtom = timekeeper.wall_to_monotonic;
 		*sleep = timekeeper.total_sleep_time;
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 }
 
 #ifdef CONFIG_HIGH_RES_TIMERS
@@ -1290,7 +1368,7 @@ ktime_t ktime_get_update_offsets(ktime_t *offs_real, ktime_t *offs_boot)
 	u64 secs, nsecs;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 
 		secs = timekeeper.xtime.tv_sec;
 		nsecs = timekeeper.xtime.tv_nsec;
@@ -1300,7 +1378,7 @@ ktime_t ktime_get_update_offsets(ktime_t *offs_real, ktime_t *offs_boot)
 
 		*offs_real = timekeeper.offs_real;
 		*offs_boot = timekeeper.offs_boot;
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	now = ktime_add_ns(ktime_set(secs, 0), nsecs);
 	now = ktime_sub(now, *offs_real);
@@ -1317,9 +1395,9 @@ ktime_t ktime_get_monotonic_offset(void)
 	struct timespec wtom;
 
 	do {
-		seq = read_seqbegin(&timekeeper.lock);
+		seq = read_seqcount_begin(&timekeeper.seq);
 		wtom = timekeeper.wall_to_monotonic;
-	} while (read_seqretry(&timekeeper.lock, seq));
+	} while (read_seqcount_retry(&timekeeper.seq, seq));
 
 	return timespec_to_ktime(wtom);
 }
@@ -1334,7 +1412,9 @@ EXPORT_SYMBOL_GPL(ktime_get_monotonic_offset);
  */
 void xtime_update(unsigned long ticks)
 {
-	write_seqlock(&xtime_lock);
+	raw_spin_lock(&xtime_lock);
+	write_seqcount_begin(&xtime_seq);
 	do_timer(ticks);
-	write_sequnlock(&xtime_lock);
+	write_seqcount_end(&xtime_seq);
+	raw_spin_unlock(&xtime_lock);
 }

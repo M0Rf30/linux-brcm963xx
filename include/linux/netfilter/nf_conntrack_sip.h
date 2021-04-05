@@ -5,6 +5,78 @@
 #define SIP_PORT	5060
 #define SIP_TIMEOUT	3600
 
+
+/******************************************For Linux Native SIP ALG*********************************************/
+/* Zyxel 
+ * If an de-register packet with remove all binding contact. It will return NF_ACCEPT without update cseq from here.
+ * This will cause the 200 OK response of this packet not be accept in SIP ALG, thus the expect of signaling will not be remove.
+ * Now we will Try to parsing Contact with remove all binding when parsing Contact header failed.
+ * Steve 2017-11-16
+ */
+#define ZYXEL_SIP_ALG_SUPPORT_RM_ALL_BINDING 1
+
+
+
+/* Zyxel
+ * Only SIP traffic which be NATed will into SIP ALG.
+ */
+#define ZYXEL_SIP_ALG_IGNORE_LOCAL_TRAFFIC 1
+
+#define ZYXEL_SIP_ALG_DEFAULT_DIRECT_SIGNALLING 0 //sip_direct_signalling, original is 1 use this macro to define new
+#define ZYXEL_SIP_ALG_DEFAULT_DIRECT_MEDIA 0 //sip_direct_media, original is 1 use this macro to define new
+/******************************************For Linux Native SIP ALG (END)****************************************/
+
+
+
+#if defined(CONFIG_BCM_KF_NETFILTER) && !defined(CONFIG_ZYXEL_USE_LINUX_SIP_ALG)
+
+/* Classes defined by Broadcom */
+#define SIP_EXPECT_CLASS_SIGNALLING	0
+#define SIP_EXPECT_CLASS_AUDIO		1
+#define SIP_EXPECT_CLASS_VIDEO		2
+#define SIP_EXPECT_CLASS_OTHER		3
+#define SIP_EXPECT_CLASS_MAX		3
+
+enum sip_header_pos {
+	POS_VIA,
+	POS_CONTACT,
+	POS_CONTENT,
+	POS_OWNER_IP4,
+	POS_CONNECTION_IP4,
+	POS_ANAT,
+	POS_MEDIA_AUDIO,
+	POS_MEDIA_VIDEO,
+	POS_ARTCP_IP4,
+};
+
+extern int (*nf_nat_addr_hook)(struct sk_buff *skb, unsigned int protoff,
+			       struct nf_conn *ct,
+			       enum ip_conntrack_info ctinfo, char **dptr,
+			       int *dlen, char **addr_begin, int *addr_len,
+			       struct nf_conntrack_man *addr);
+
+extern int (*nf_nat_rtp_hook)(struct sk_buff *skb, unsigned int protoff,
+			      struct nf_conn *ct,
+			      enum ip_conntrack_info ctinfo, char **dptr,
+			      int *dlen, struct nf_conntrack_expect *exp,
+			      char **port_begin, int *port_len);
+
+extern int (*nf_nat_snat_hook)(struct nf_conn *ct,
+			       enum ip_conntrack_info ctinfo,
+			       struct nf_conntrack_expect *exp);
+
+extern int (*nf_nat_sip_hook)(struct sk_buff *skb, unsigned int protoff,
+			      struct nf_conn *ct,
+			      enum ip_conntrack_info ctinfo, char **dptr,
+			      int *dlen, struct nf_conntrack_expect *exp,
+			      char **addr_begin, int *addr_len);
+
+struct nf_ct_sip_master {
+	unsigned int	register_cseq;
+	unsigned int	invite_cseq;
+};
+#else /* CONFIG_BCM_KF_NETFILTER */
+
 struct nf_ct_sip_master {
 	unsigned int	register_cseq;
 	unsigned int	invite_cseq;
@@ -85,6 +157,9 @@ enum sip_header_types {
 	SIP_HDR_FROM,
 	SIP_HDR_TO,
 	SIP_HDR_CONTACT,
+#ifdef ZYXEL_SIP_ALG_SUPPORT_RM_ALL_BINDING
+	SIP_HDR_CONTACT_RM_ALL_BINDING,
+#endif //#ifdef ZYXEL_SIP_ALG_SUPPORT_RM_ALL_BINDING
 	SIP_HDR_VIA_UDP,
 	SIP_HDR_VIA_TCP,
 	SIP_HDR_EXPIRES,
@@ -174,6 +249,6 @@ extern int ct_sip_get_sdp_header(const struct nf_conn *ct, const char *dptr,
 				 enum sdp_header_types type,
 				 enum sdp_header_types term,
 				 unsigned int *matchoff, unsigned int *matchlen);
-
+#endif /* CONFIG_BCM_KF_NETFILTER */
 #endif /* __KERNEL__ */
 #endif /* __NF_CONNTRACK_SIP_H__ */

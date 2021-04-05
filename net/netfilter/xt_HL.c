@@ -25,12 +25,24 @@ MODULE_AUTHOR("Maciej Soltysiak <solt@dns.toxicfilms.tv>");
 MODULE_DESCRIPTION("Xtables: Hoplimit/TTL Limit field modification target");
 MODULE_LICENSE("GPL");
 
+#ifdef CONFIG_BCM_KF_FILENAME_CHECK
+/* Create compile error if filename is not correct (to catch case-sensitive filename errors) */
+#define __CHECK_FILENAME(filename) int __checkfname __attribute__((unused)) = (1/((__builtin_strcmp((__FILE__ + __builtin_strlen(__FILE__) - __builtin_strlen(filename)), filename))?0:1))
+__CHECK_FILENAME("xt_HL.c");
+#endif
+
 static unsigned int
 ttl_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	struct iphdr *iph;
 	const struct ipt_TTL_info *info = par->targinfo;
 	int new_ttl;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_TTL;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
 
 	if (!skb_make_writable(skb, skb->len))
 		return NF_DROP;
@@ -71,6 +83,12 @@ hl_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 	struct ipv6hdr *ip6h;
 	const struct ip6t_HL_info *info = par->targinfo;
 	int new_hl;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_HL;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
 
 	if (!skb_make_writable(skb, skb->len))
 		return NF_DROP;

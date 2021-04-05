@@ -19,6 +19,12 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_DSCP.h>
 
+#ifdef CONFIG_BCM_KF_FILENAME_CHECK
+/* Create compile error if filename is not correct (to catch case-sensitive filename errors) */
+#define __CHECK_FILENAME(filename) int __checkfname __attribute__((unused)) = (1/((__builtin_strcmp((__FILE__ + __builtin_strlen(__FILE__) - __builtin_strlen(filename)), filename))?0:1))
+__CHECK_FILENAME("xt_DSCP.c");
+#endif
+
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("Xtables: DSCP/TOS field modification");
 MODULE_LICENSE("GPL");

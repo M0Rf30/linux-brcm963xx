@@ -25,6 +25,12 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS("ipt_ttl");
 MODULE_ALIAS("ip6t_hl");
 
+#ifdef CONFIG_BCM_KF_FILENAME_CHECK
+/* Create compile error if filename is not correct (to catch case-sensitive filename errors) */
+#define __CHECK_FILENAME(filename) int __checkfname __attribute__((unused)) = (1/((__builtin_strcmp((__FILE__ + __builtin_strlen(__FILE__) - __builtin_strlen(filename)), filename))?0:1))
+__CHECK_FILENAME("xt_hl.c");
+#endif
+
 static bool ttl_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct ipt_ttl_info *info = par->matchinfo;

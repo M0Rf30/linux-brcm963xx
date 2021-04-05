@@ -55,6 +55,9 @@
 
 #include <net/ipv6.h>
 #include <net/ip6_checksum.h>
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+#include <net/ping.h>
+#endif
 #include <net/protocol.h>
 #include <net/raw.h>
 #include <net/rawv6.h>
@@ -79,10 +82,26 @@ static inline struct sock *icmpv6_sk(struct net *net)
 	return net->ipv6.icmp_sk[smp_processor_id()];
 }
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+static void icmpv6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
+		       u8 type, u8 code, int offset, __be32 info)
+{
+	/* icmpv6_notify checks 8 bytes can be pulled, icmp6hdr is 8 bytes */
+	struct icmp6hdr *icmp6 = (struct icmp6hdr *) (skb->data + offset);
+
+	if (!(type & ICMPV6_INFOMSG_MASK))
+		if (icmp6->icmp6_type == ICMPV6_ECHO_REQUEST)
+			ping_err(skb, offset, info);
+}
+
+#endif
 static int icmpv6_rcv(struct sk_buff *skb);
 
 static const struct inet6_protocol icmpv6_protocol = {
 	.handler	=	icmpv6_rcv,
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	.err_handler	=	icmpv6_err,
+#endif
 	.flags		=	INET6_PROTO_NOPOLICY|INET6_PROTO_FINAL,
 };
 
@@ -217,7 +236,12 @@ static __inline__ int opt_unrec(struct sk_buff *skb, __u32 offset)
 	return (*op & 0xC0) == 0x80;
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static int icmpv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6, struct icmp6hdr *thdr, int len)
+#else
+int icmpv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
+			       struct icmp6hdr *thdr, int len)
+#endif
 {
 	struct sk_buff *skb;
 	struct icmp6hdr *icmp6h;
@@ -300,8 +324,13 @@ static void mip6_addr_swap(struct sk_buff *skb)
 static inline void mip6_addr_swap(struct sk_buff *skb) {}
 #endif
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static struct dst_entry *icmpv6_route_lookup(struct net *net, struct sk_buff *skb,
 					     struct sock *sk, struct flowi6 *fl6)
+#else
+struct dst_entry *icmpv6_route_lookup(struct net *net, struct sk_buff *skb,
+				      struct sock *sk, struct flowi6 *fl6)
+#endif
 {
 	struct dst_entry *dst, *dst2;
 	struct flowi6 fl2;
@@ -428,7 +457,11 @@ void icmpv6_send(struct sk_buff *skb, u8 type, u8 code, __u32 info)
 	 *	and anycast addresses will be checked later.
 	 */
 	if ((addr_type == IPV6_ADDR_ANY) || (addr_type & IPV6_ADDR_MULTICAST)) {
+#if defined(CONFIG_BCM_KF_FAP)	
+		LIMIT_NETDEBUG(KERN_DEBUG "icmpv6_send: addr_any/mcast source type %d\n", type);
+#else
 		LIMIT_NETDEBUG(KERN_DEBUG "icmpv6_send: addr_any/mcast source\n");
+#endif				
 		return;
 	}
 
@@ -455,6 +488,17 @@ void icmpv6_send(struct sk_buff *skb, u8 type, u8 code, __u32 info)
 	sk = icmpv6_xmit_lock(net);
 	if (sk == NULL)
 		return;
+
+/* __ZyXEL__, Albert, 20170213, for ANATEL Conformance IPv6 Test  */
+#if 1 //Keep the original MARK when this packet is the case of reject-with. 
+    if((type == ICMPV6_DEST_UNREACH && code == ICMPV6_POLICY_FAIL)){
+            if(skb->mark > 0){
+                sk->sk_mark = skb->mark;
+                fl6.flowi6_mark = skb->mark;
+            }
+    }
+#endif
+
 	np = inet6_sk(sk);
 
 	if (!icmpv6_xrlim_allow(sk, type, &fl6))
@@ -594,7 +638,11 @@ out:
 	icmpv6_xmit_unlock(sk);
 }
 
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 static void icmpv6_notify(struct sk_buff *skb, u8 type, u8 code, __be32 info)
+#else
+void icmpv6_notify(struct sk_buff *skb, u8 type, u8 code, __be32 info)
+#endif
 {
 	const struct inet6_protocol *ipprot;
 	int inner_offset;
@@ -646,7 +694,11 @@ static int icmpv6_rcv(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
 	struct inet6_dev *idev = __in6_dev_get(dev);
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	struct in6_addr saddr, daddr;
+#else
 	const struct in6_addr *saddr, *daddr;
+#endif
 	const struct ipv6hdr *orig_hdr;
 	struct icmp6hdr *hdr;
 	u8 type;
@@ -673,22 +725,53 @@ static int icmpv6_rcv(struct sk_buff *skb)
 
 	ICMP6_INC_STATS_BH(dev_net(dev), idev, ICMP6_MIB_INMSGS);
 
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+	memcpy(&saddr, &ipv6_hdr(skb)->saddr, sizeof(struct in6_addr));
+	memcpy(&daddr, &ipv6_hdr(skb)->daddr, sizeof(struct in6_addr));
+#else
 	saddr = &ipv6_hdr(skb)->saddr;
 	daddr = &ipv6_hdr(skb)->daddr;
+#endif
 
 	/* Perform checksum. */
 	switch (skb->ip_summed) {
 	case CHECKSUM_COMPLETE:
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		if (!csum_ipv6_magic(&saddr, &daddr, skb->len, IPPROTO_ICMPV6,
+				     skb->csum))
+			break;
+#else
 		if (!csum_ipv6_magic(saddr, daddr, skb->len, IPPROTO_ICMPV6,
 				     skb->csum))
 			break;
+#endif
 		/* fall through */
 	case CHECKSUM_NONE:
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		skb->csum = ~csum_unfold(csum_ipv6_magic(&saddr, &daddr, skb->len,
+					     IPPROTO_ICMPV6, 0));
+#else
 		skb->csum = ~csum_unfold(csum_ipv6_magic(saddr, daddr, skb->len,
 					     IPPROTO_ICMPV6, 0));
+#endif
 		if (__skb_checksum_complete(skb)) {
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 			LIMIT_NETDEBUG(KERN_DEBUG "ICMPv6 checksum failed [%pI6 > %pI6]\n",
+#else
+			LIMIT_NETDEBUG(KERN_DEBUG
+				       "ICMPv6 checksum failed [%pI6c > %pI6c]\n",
+#endif
+				       &saddr, &daddr);
+#else
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
+			LIMIT_NETDEBUG(KERN_DEBUG "ICMPv6 checksum failed [%pI6 > %pI6]\n",
+#else
+			LIMIT_NETDEBUG(KERN_DEBUG
+				       "ICMPv6 checksum failed [%pI6c > %pI6c]\n",
+#endif
 				       saddr, daddr);
+#endif
 			goto discard_it;
 		}
 	}
@@ -708,7 +791,11 @@ static int icmpv6_rcv(struct sk_buff *skb)
 		break;
 
 	case ICMPV6_ECHO_REPLY:
+#if !defined(CONFIG_BCM_KF_ANDROID) || !defined(CONFIG_BCM_ANDROID)
 		/* we couldn't care less */
+#else
+		ping_rcv(skb);
+#endif
 		break;
 
 	case ICMPV6_PKT_TOOBIG:
@@ -721,8 +808,15 @@ static int icmpv6_rcv(struct sk_buff *skb)
 			goto discard_it;
 		hdr = icmp6_hdr(skb);
 		orig_hdr = (struct ipv6hdr *) (hdr + 1);
+#if defined(CONFIG_MIPS_BCM963XX) && defined(CONFIG_BCM_KF_UNALIGNED_EXCEPTION)
+		memcpy(&saddr, &orig_hdr->saddr, sizeof(struct in6_addr));
+		memcpy(&daddr, &orig_hdr->daddr, sizeof(struct in6_addr));
+		rt6_pmtu_discovery(&daddr, &saddr, dev,
+				   ntohl(hdr->icmp6_mtu));
+#else
 		rt6_pmtu_discovery(&orig_hdr->daddr, &orig_hdr->saddr, dev,
 				   ntohl(hdr->icmp6_mtu));
+#endif
 
 		/*
 		 *	Drop through to notify

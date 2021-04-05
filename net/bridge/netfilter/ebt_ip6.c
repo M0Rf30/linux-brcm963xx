@@ -53,6 +53,15 @@ ebt_ip6_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	    FWINV(ipv6_masked_addr_cmp(&ih6->daddr, &info->dmsk,
 				       &info->daddr), EBT_IP6_DEST))
 		return false;
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+	if(info->bitmask & EBT_IP6_LENGTH) {
+		u16 len = ntohs(ih6->payload_len);
+		if (FWINV(len < info->length[0] ||
+					len > info->length[1],
+					EBT_IP6_LENGTH))
+			return false;
+	}
+#endif
 	if (info->bitmask & EBT_IP6_PROTO) {
 		uint8_t nexthdr = ih6->nexthdr;
 		__be16 frag_off;
@@ -126,6 +135,10 @@ static int ebt_ip6_mt_check(const struct xt_mtchk_param *par)
 		    info->icmpv6_code[0] > info->icmpv6_code[1])
 			return -EINVAL;
 	}
+#if 1 /* ZyXEL QoS, John (porting from MSTC) */
+        if (info->bitmask & EBT_IP6_LENGTH && info->length[0] > info->length[1])
+		return false;
+#endif
 	return 0;
 }
 

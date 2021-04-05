@@ -32,6 +32,10 @@
 #include <linux/usb/cdc.h>
 #include <linux/usb/usbnet.h>
 
+#if defined(ZYXEL) && (ZYXEL==1)
+#include "board.h"
+extern void USB_LED_Control( int USBId, int status );
+#endif
 
 #if defined(CONFIG_USB_NET_RNDIS_HOST) || defined(CONFIG_USB_NET_RNDIS_HOST_MODULE)
 
@@ -448,6 +452,10 @@ int usbnet_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 		usb_driver_release_interface(driver_of(intf), info->data);
 		return status;
 	}
+
+#if defined(ZYXEL) && (ZYXEL==1)
+	USB_LED_Control(dev->udev->portnum, 0x01);
+#endif
 
 	/* FIXME cdc-ether has some multicast code too, though it complains
 	 * in routine cases.  info->ether describes the multicast support.

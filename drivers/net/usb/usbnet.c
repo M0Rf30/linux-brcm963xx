@@ -47,6 +47,11 @@
 #include <linux/kernel.h>
 #include <linux/pm_runtime.h>
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM_USBNET_ACCELERATION) && defined(CONFIG_BLOG))
+#include <linux/nbuff.h> 
+#include <linux/blog.h>
+#endif
+
 #define DRIVER_VERSION		"22-Aug-2005"
 
 
@@ -59,15 +64,13 @@
  * For high speed, each frame comfortably fits almost 36 max size
  * Ethernet packets (so queues should be bigger).
  *
- * REVISIT qlens should be members of 'struct usbnet'; the goal is to
- * let the USB host controller be busy for 5msec or more before an irq
- * is required, under load.  Jumbograms change the equation.
+ * The goal is to let the USB host controller be busy for 5msec or
+ * more before an irq is required, under load.  Jumbograms change
+ * the equation.
  */
-#define RX_MAX_QUEUE_MEMORY (60 * 1518)
-#define	RX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? \
-			(RX_MAX_QUEUE_MEMORY/(dev)->rx_urb_size) : 4)
-#define	TX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? \
-			(RX_MAX_QUEUE_MEMORY/(dev)->hard_mtu) : 4)
+#define	MAX_QUEUE_MEMORY	(60 * 1518)
+#define	RX_QLEN(dev)		((dev)->rx_qlen)
+#define	TX_QLEN(dev)		((dev)->tx_qlen)
 
 // reawaken network queue this soon after stopping; else watchdog barks
 #define TX_TIMEOUT_JIFFIES	(5*HZ)
@@ -232,7 +235,33 @@ void usbnet_skb_return (struct usbnet *dev, struct sk_buff *skb)
 		return;
 	}
 
-	skb->protocol = eth_type_trans (skb, dev->net);
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM_USBNET_ACCELERATION) && defined(CONFIG_BLOG))
+	if(skb->clone_fc_head == NULL)
+	{
+		/* Make sure fcache does not expand the skb->data if clone_fc_head
+		 * is not set by the dongle driver's(ex:rndis_host.c, asix.c etc..)
+		 * we expect dongle/class drivers using fcache to set minumun headroom
+		 * available for all packets in an aggregated skb by calling 
+		 * skb_clone_headers_set() before calling usbnet_skb_return.
+		 *
+		 * Ex:rndis based drivers have 8 bytes spacig between 2 packets in an
+		 * aggreated skb. we can call skb_clone_ headers_set(skb, 8) in
+		 * rndis_rx_fixup();
+		 * By setting this we are telling fcache or enet driver can expand
+		 * skb->data for upto 8 bytes. This is helpful to avoid packet
+		 * copy incase of LAN VLAN's, External Switch tag's  etc..
+		 *   
+		 */
+		skb_clone_headers_set(skb, 0);
+	}
+	if (PKT_DONE == blog_sinit(skb, skb->dev, TYPE_ETH, 0, BLOG_USBPHY)) {
+		return;
+	}
+#endif
+
+	if (!skb->protocol)
+		skb->protocol = eth_type_trans(skb, dev->net);
+
 	dev->net->stats.rx_packets++;
 	dev->net->stats.rx_bytes += skb->len;
 
@@ -243,12 +272,41 @@ void usbnet_skb_return (struct usbnet *dev, struct sk_buff *skb)
 	if (skb_defer_rx_timestamp(skb))
 		return;
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM_USBNET_ACCELERATION) && defined(CONFIG_BLOG))
+	status = netif_receive_skb(skb);
+#else
 	status = netif_rx (skb);
+#endif
 	if (status != NET_RX_SUCCESS)
 		netif_dbg(dev, rx_err, dev->net,
 			  "netif_rx status %d\n", status);
 }
 EXPORT_SYMBOL_GPL(usbnet_skb_return);
+
+/* must be called if hard_mtu or rx_urb_size changed */
+void usbnet_update_max_qlen(struct usbnet *dev)
+{
+	enum usb_device_speed speed = dev->udev->speed;
+
+	switch (speed) {
+	case USB_SPEED_HIGH:
+		dev->rx_qlen = MAX_QUEUE_MEMORY / dev->rx_urb_size;
+		dev->tx_qlen = MAX_QUEUE_MEMORY / dev->hard_mtu;
+		break;
+	case USB_SPEED_SUPER:
+		/*
+		 * Not take default 5ms qlen for super speed HC to
+		 * save memory, and iperf tests show 2.5ms qlen can
+		 * work well
+		 */
+		dev->rx_qlen = 5 * MAX_QUEUE_MEMORY / dev->rx_urb_size;
+		dev->tx_qlen = 5 * MAX_QUEUE_MEMORY / dev->hard_mtu;
+		break;
+	default:
+		dev->rx_qlen = dev->tx_qlen = 4;
+	}
+}
+EXPORT_SYMBOL_GPL(usbnet_update_max_qlen);
 
 
 /*-------------------------------------------------------------------------
@@ -277,6 +335,9 @@ int usbnet_change_mtu (struct net_device *net, int new_mtu)
 		if (dev->rx_urb_size > old_rx_urb_size)
 			usbnet_unlink_rx_urbs(dev);
 	}
+
+	/* max qlen depend on hard_mtu and rx_urb_size */
+	usbnet_update_max_qlen(dev);
 
 	return 0;
 }
@@ -333,6 +394,10 @@ void usbnet_defer_kevent (struct usbnet *dev, int work)
 }
 EXPORT_SYMBOL_GPL(usbnet_defer_kevent);
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM96838))
+int bcm_usb_hw_align_size = 1024;
+#endif
+
 /*-------------------------------------------------------------------------*/
 
 static void rx_complete (struct urb *urb);
@@ -345,13 +410,26 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 	unsigned long		lockflags;
 	size_t			size = dev->rx_urb_size;
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM96838))
+	skb = __netdev_alloc_skb_ip_align(dev->net, size + bcm_usb_hw_align_size, flags);
+#else
 	skb = __netdev_alloc_skb_ip_align(dev->net, size, flags);
+#endif
+
 	if (!skb) {
 		netif_dbg(dev, rx_err, dev->net, "no rx skb\n");
 		usbnet_defer_kevent (dev, EVENT_RX_MEMORY);
 		usb_free_urb (urb);
 		return -ENOMEM;
 	}
+
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM96838))
+    {
+        unsigned int aligned_len = (unsigned int)skb->data;
+        aligned_len = bcm_usb_hw_align_size - (aligned_len & (bcm_usb_hw_align_size - 1));
+		skb_reserve(skb, aligned_len);
+    }
+#endif
 
 	entry = (struct skb_data *) skb->cb;
 	entry->urb = urb;
@@ -762,6 +840,9 @@ int usbnet_open (struct net_device *net)
 		goto done;
 	}
 
+	/* hard_mtu or rx_urb_size may change in reset() */
+	usbnet_update_max_qlen(dev);
+
 	// insist peer be connected
 	if (info->check_connect && (retval = info->check_connect (dev)) < 0) {
 		netif_dbg(dev, ifup, dev->net, "can't open; %d\n", retval);
@@ -839,6 +920,9 @@ int usbnet_set_settings (struct net_device *net, struct ethtool_cmd *cmd)
 	if (dev->driver_info->link_reset)
 		dev->driver_info->link_reset(dev);
 
+	/* hard_mtu or rx_urb_size may change in link_reset() */
+	usbnet_update_max_qlen(dev);
+
 	return retval;
 
 }
@@ -912,6 +996,30 @@ static const struct ethtool_ops usbnet_ethtool_ops = {
 };
 
 /*-------------------------------------------------------------------------*/
+
+static void __handle_link_change(struct usbnet *dev)
+{
+	if (!test_bit(EVENT_DEV_OPEN, &dev->flags))
+		return;
+
+	if (!netif_carrier_ok(dev->net)) {
+		/* kill URBs for reading packets to save bus bandwidth */
+		unlink_urbs(dev, &dev->rxq);
+
+		/*
+		 * tx_timeout will unlink URBs for sending packets and
+		 * tx queue is stopped by netcore after link becomes off
+		 */
+	} else {
+		/* submitting URBs for reading packets */
+		tasklet_schedule(&dev->bh);
+	}
+
+	/* hard_mtu or rx_urb_size may change during link change */
+	usbnet_update_max_qlen(dev);
+
+	clear_bit(EVENT_LINK_CHANGE, &dev->flags);
+}
 
 /* work that cannot be done in interrupt context uses keventd.
  *
@@ -1010,7 +1118,13 @@ skip_reset:
 		} else {
 			usb_autopm_put_interface(dev->intf);
 		}
+
+		/* handle link change from link resetting */
+		__handle_link_change(dev);
 	}
+
+	if (test_bit (EVENT_LINK_CHANGE, &dev->flags))
+		__handle_link_change(dev);
 
 	if (dev->flags)
 		netdev_dbg(dev->net, "kevent done, flags = 0x%lx\n", dev->flags);
@@ -1092,6 +1206,21 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 	unsigned long		flags;
 	int retval;
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM_USBNET_ACCELERATION) && defined(CONFIG_BLOG))
+	if(skb)
+	{
+		struct sk_buff *orig_skb = skb;
+		skb = nbuff_xlate((pNBuff_t )skb);
+		if (skb == NULL)
+		{
+			dev->net->stats.tx_dropped++;
+			nbuff_free((pNBuff_t) orig_skb);
+			return NETDEV_TX_OK;
+		}
+		blog_emit( skb, net, TYPE_ETH, 0, BLOG_USBPHY );
+	}
+#endif
+
 	if (skb)
 		skb_tx_timestamp(skb);
 
@@ -1109,6 +1238,35 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 			}
 		}
 	}
+
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM963268))
+	/* on 63268 if TX buffer is not 4 byte aligned then some times 
+	 * USB descriptors are corrupted beacuse of a BUG in hW
+	 * for unaligned buffers copy data to a new aligned buffer
+	 */
+	if (((unsigned int)skb->data & 0x3) ) {
+		struct sk_buff	*oskb = skb;
+		int newheadroom = skb_headroom(oskb);
+		/* create a new skb from an existing skb 
+		 * and adjust the data pointer to be word aligned
+		 */
+		newheadroom += newheadroom%4;  
+		skb = skb_copy_expand(oskb, newheadroom, 1, GFP_ATOMIC);
+		dev_kfree_skb_any(oskb);
+
+		if ( unlikely(!skb) )
+			goto drop;
+
+		if (unlikely((unsigned int)skb->data & 0x3))
+		{
+			printk(KERN_WARNING"%s: unaligned skb->data=%p \n", __func__,
+				 skb->data);
+			goto drop;
+		}
+	}
+#endif
+
+
 	length = skb->len;
 
 	if (!(urb = usb_alloc_urb (0, GFP_ATOMIC))) {
@@ -1158,6 +1316,9 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 		usb_anchor_urb(urb, &dev->deferred);
 		/* no use to process more packets */
 		netif_stop_queue(net);
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+		usb_put_urb(urb);
+#endif
 		spin_unlock_irqrestore(&dev->txq.lock, flags);
 		netdev_dbg(dev->net, "Delaying transmission for resumption\n");
 		goto deferred;
@@ -1299,6 +1460,10 @@ void usbnet_disconnect (struct usb_interface *intf)
 
 	cancel_work_sync(&dev->kevent);
 
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	usb_scuttle_anchored_urbs(&dev->deferred);
+
+#endif
 	if (dev->driver_info->unbind)
 		dev->driver_info->unbind (dev, intf);
 
@@ -1413,6 +1578,9 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	net->watchdog_timeo = TX_TIMEOUT_JIFFIES;
 	net->ethtool_ops = &usbnet_ethtool_ops;
 
+#if (defined(CONFIG_BCM_KF_USBNET) && defined(CONFIG_BCM96838))
+    printk("+++++ &bcm_usb_hw_align_size =%p \n", &bcm_usb_hw_align_size);
+#endif
 	// allow device-specific bind/init procedures
 	// NOTE net->name still not usable ...
 	if (info->bind) {
@@ -1433,6 +1601,10 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		/* WWAN devices should always be named "wwan%d" */
 		if ((dev->driver_info->flags & FLAG_WWAN) != 0)
 			strcpy(net->name, "wwan%d");
+
+		/* devices that cannot do ARP */
+		if ((dev->driver_info->flags & FLAG_NOARP) != 0)
+			net->flags |= IFF_NOARP;
 
 		/* maybe the remote can't receive an Ethernet MTU */
 		if (net->mtu > (dev->hard_mtu - net->hard_header_len))
@@ -1463,6 +1635,9 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		SET_NETDEV_DEVTYPE(net, &wlan_type);
 	if ((dev->driver_info->flags & FLAG_WWAN) != 0)
 		SET_NETDEV_DEVTYPE(net, &wwan_type);
+
+	/* initialize max rx_qlen and tx_qlen */
+	usbnet_update_max_qlen(dev);
 
 	status = register_netdev (net);
 	if (status)
@@ -1577,7 +1752,119 @@ int usbnet_resume (struct usb_interface *intf)
 }
 EXPORT_SYMBOL_GPL(usbnet_resume);
 
+/*
+ * For devices that can do without special commands
+ */
+int usbnet_manage_power(struct usbnet *dev, int on)
+{
+	dev->intf->needs_remote_wakeup = on;
+	return 0;
+}
+EXPORT_SYMBOL(usbnet_manage_power);
 
+void usbnet_link_change(struct usbnet *dev, bool link, bool need_reset)
+{
+	/* update link after link is reseted */
+	if (link && !need_reset)
+		netif_carrier_on(dev->net);
+	else
+		netif_carrier_off(dev->net);
+
+	if (need_reset && link)
+		usbnet_defer_kevent(dev, EVENT_LINK_RESET);
+	else
+		usbnet_defer_kevent(dev, EVENT_LINK_CHANGE);
+}
+EXPORT_SYMBOL(usbnet_link_change);
+
+/*-------------------------------------------------------------------------*/
+static int __usbnet_read_cmd(struct usbnet *dev, u8 cmd, u8 reqtype,
+			     u16 value, u16 index, void *data, u16 size)
+{
+	void *buf = NULL;
+	int err = -ENOMEM;
+
+	netdev_dbg(dev->net, "usbnet_read_cmd cmd=0x%02x reqtype=%02x"
+		   " value=0x%04x index=0x%04x size=%d\n",
+		   cmd, reqtype, value, index, size);
+
+	if (data) {
+		buf = kmalloc(size, GFP_KERNEL);
+		if (!buf)
+			goto out;
+	}
+
+	err = usb_control_msg(dev->udev, usb_rcvctrlpipe(dev->udev, 0),
+			      cmd, reqtype, value, index, buf, size,
+			      USB_CTRL_GET_TIMEOUT);
+	if (err > 0 && err <= size)
+		memcpy(data, buf, err);
+	kfree(buf);
+out:
+	return err;
+}
+
+static int __usbnet_write_cmd(struct usbnet *dev, u8 cmd, u8 reqtype,
+			      u16 value, u16 index, const void *data,
+			      u16 size)
+{
+	void *buf = NULL;
+	int err = -ENOMEM;
+
+	netdev_dbg(dev->net, "usbnet_write_cmd cmd=0x%02x reqtype=%02x"
+		   " value=0x%04x index=0x%04x size=%d\n",
+		   cmd, reqtype, value, index, size);
+
+	if (data) {
+		buf = kmemdup(data, size, GFP_KERNEL);
+		if (!buf)
+			goto out;
+	}
+
+	err = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+			      cmd, reqtype, value, index, buf, size,
+			      USB_CTRL_SET_TIMEOUT);
+	kfree(buf);
+
+out:
+	return err;
+}
+
+/*
+ * The function can't be called inside suspend/resume callback,
+ * otherwise deadlock will be caused.
+ */
+int usbnet_read_cmd(struct usbnet *dev, u8 cmd, u8 reqtype,
+		    u16 value, u16 index, void *data, u16 size)
+{
+	int ret;
+
+	if (usb_autopm_get_interface(dev->intf) < 0)
+		return -ENODEV;
+	ret = __usbnet_read_cmd(dev, cmd, reqtype, value, index,
+				data, size);
+	usb_autopm_put_interface(dev->intf);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(usbnet_read_cmd);
+
+/*
+ * The function can't be called inside suspend/resume callback,
+ * otherwise deadlock will be caused.
+ */
+int usbnet_write_cmd(struct usbnet *dev, u8 cmd, u8 reqtype,
+		     u16 value, u16 index, const void *data, u16 size)
+{
+	int ret;
+
+	if (usb_autopm_get_interface(dev->intf) < 0)
+		return -ENODEV;
+	ret = __usbnet_write_cmd(dev, cmd, reqtype, value, index,
+				 data, size);
+	usb_autopm_put_interface(dev->intf);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(usbnet_write_cmd);
 /*-------------------------------------------------------------------------*/
 
 static int __init usbnet_init(void)

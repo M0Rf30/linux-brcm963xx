@@ -178,6 +178,9 @@ static int generic_probe(struct usb_device *udev)
 	}
 	/* USB device state == configured ... usable */
 	usb_notify_add_device(udev);
+	if( udev->portnum != 0x0)	// port 0 will be root
+		USB_LED_Control( udev->portnum, 0x01 );
+	//printk("===> Add device at USB port %d\n", udev->portnum);
 
 	return 0;
 }
@@ -185,6 +188,9 @@ static int generic_probe(struct usb_device *udev)
 static void generic_disconnect(struct usb_device *udev)
 {
 	usb_notify_remove_device(udev);
+	if( udev->portnum != 0x0)	// port 0 will be root
+		USB_LED_Control( udev->portnum, 0x00 );
+	//printk("===> Remove device at USB port %d\n", udev->portnum);
 
 	/* if this is only an unbind, not a physical disconnect, then
 	 * unconfigure the device */

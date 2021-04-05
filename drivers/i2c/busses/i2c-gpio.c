@@ -24,6 +24,16 @@ struct i2c_gpio_private_data {
 	struct i2c_gpio_platform_data pdata;
 };
 
+#if !defined(CONFIG_GPIOLIB) && (defined(CONFIG_BCM963138) || defined(CONFIG_BCM963381) || defined(CONFIG_BCM963148))
+extern int gpio_request(unsigned bpGpio, const char *label);
+extern void gpio_free(unsigned bpGpio);
+extern void gpio_set_value(unsigned bpGpio, int value);
+extern int gpio_direction_input(unsigned bpGpio);
+extern int gpio_direction_output(unsigned bpGpio, int value);
+extern int gpio_get_value(unsigned bpGpio);
+extern bool gpio_is_valid(int number);
+#endif
+
 /* Toggle SDA by changing the direction of the pin */
 static void i2c_gpio_setsda_dir(void *data, int state)
 {

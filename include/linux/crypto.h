@@ -81,6 +81,10 @@
  */
 #define CRYPTO_ALG_KERN_DRIVER_ONLY	0x00001000
 
+#if defined(CONFIG_BLOG) && defined(CONFIG_BCM_KF_BLOG)
+#define CRYPTO_ALG_BLOG			0x80000000
+#endif
+
 /*
  * Transform masks and values (for crt_flags).
  */
@@ -171,7 +175,15 @@ struct aead_request {
 	struct scatterlist *assoc;
 	struct scatterlist *src;
 	struct scatterlist *dst;
-
+#if defined(CONFIG_BCM_KF_SPU) && (defined(CONFIG_BCM_SPU) || defined(CONFIG_BCM_SPU_MODULE))
+#if defined(CONFIG_BCM_RDPA) || defined(CONFIG_BCM_RDPA_MODULE)
+	unsigned int data_offset;
+	u8           next_hdr;
+#else
+	int alloc_buff_spu;
+	int headerLen;
+#endif
+#endif
 	void *__ctx[] CRYPTO_MINALIGN_ATTR;
 };
 

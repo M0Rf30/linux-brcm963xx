@@ -1413,6 +1413,9 @@ struct ubifs_info {
 	struct list_head freeable_list;
 	struct list_head frdi_idx_list;
 	int freeable_cnt;
+#if defined(CONFIG_BCM_KF_ANDROID) && defined(CONFIG_BCM_ANDROID)
+	int in_a_category_cnt;
+#endif
 
 	int ltab_lnum;
 	int ltab_offs;

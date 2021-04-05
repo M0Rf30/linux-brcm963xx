@@ -20,6 +20,9 @@
 #include <linux/skbuff.h>
 #include <net/netlink.h>
 #include <net/pkt_sched.h>
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG) /* ZyXEL QoS, porting from MSTC */
+#include <linux/blog.h>
+#endif
 
 
 /*	Simple Token Bucket Filter.
@@ -127,8 +130,16 @@ static int tbf_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 
 	ret = qdisc_enqueue(skb, q->qdisc);
 	if (ret != NET_XMIT_SUCCESS) {
+#if 1 /* ZyXEL QoS, porting from MSTC */
+		if (net_xmit_drop_count(ret))
+		 {
+			sch->qstats.drops++;
+			sch->bstats.dropbytes += skb->len;
+		}
+#else
 		if (net_xmit_drop_count(ret))
 			sch->qstats.drops++;
+#endif
 		return ret;
 	}
 
@@ -186,6 +197,9 @@ static struct sk_buff *tbf_dequeue(struct Qdisc *sch)
 			sch->q.qlen--;
 			qdisc_unthrottled(sch);
 			qdisc_bstats_update(sch, skb);
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG) /* ZyXEL QoS, porting from MSTC */
+			blog_skip(skb);
+#endif
 			return skb;
 		}
 

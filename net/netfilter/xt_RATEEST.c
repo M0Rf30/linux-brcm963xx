@@ -19,6 +19,12 @@
 #include <linux/netfilter/xt_RATEEST.h>
 #include <net/netfilter/xt_rateest.h>
 
+#ifdef CONFIG_BCM_KF_FILENAME_CHECK
+/* Create compile error if filename is not correct (to catch case-sensitive filename errors) */
+#define __CHECK_FILENAME(filename) int __checkfname __attribute__((unused)) = (1/((__builtin_strcmp((__FILE__ + __builtin_strlen(__FILE__) - __builtin_strlen(filename)), filename))?0:1))
+__CHECK_FILENAME("xt_RATEEST.c");
+#endif
+
 static DEFINE_MUTEX(xt_rateest_mutex);
 
 #define RATEEST_HSIZE	16
@@ -81,6 +87,12 @@ xt_rateest_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	const struct xt_rateest_target_info *info = par->targinfo;
 	struct gnet_stats_basic_packed *stats = &info->est->bstats;
+
+#if defined(CONFIG_BCM_KF_BLOG) && defined(CONFIG_BLOG_FEATURE)
+	skb->ipt_check |= IPT_TARGET_RATEEST;
+	if ( skb->ipt_check & IPT_TARGET_CHECK )
+		return XT_CONTINUE;
+#endif
 
 	spin_lock_bh(&info->est->lock);
 	stats->bytes += skb->len;
